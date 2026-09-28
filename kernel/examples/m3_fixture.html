@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>M3 夹具</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 16px; }
+  section { border: 1px solid #bbb; padding: 8px 12px; margin-bottom: 12px; }
+  h2 { font-size: 15px; margin: 4px 0 8px; }
+  button, a { font: inherit; padding: 4px 10px; }
+  iframe { border: 1px solid #ddd; }
+  .stage { position: relative; display: inline-block; padding: 6px; border: 1px dashed #999; }
+  .cover { position: absolute; inset: 0; background: rgba(200, 0, 0, .18); }
+  #mark { font-weight: 600; color: #a00; }
+</style>
+</head>
+<body>
+<h1>M3 夹具：iframe / shadow DOM / 新标签 / 原生对话框</h1>
+<p id="mark">标记：无</p>
+
+<section id="frame-case">
+  <h2>1. iframe：点子页里的按钮</h2>
+  <iframe id="child" src="m3_child.html" width="420" height="160"></iframe>
+</section>
+
+<section id="shadow-case">
+  <h2>2. shadow DOM：点影子按钮</h2>
+  <m3-widget id="widget"></m3-widget>
+</section>
+
+<section id="covered-case">
+  <h2>3. shadow DOM + 遮挡：被盖住的影子按钮不该被点到</h2>
+  <div class="stage">
+    <m3-covered id="covered"></m3-covered>
+    <div class="cover" aria-label="遮罩层"></div>
+  </div>
+</section>
+
+<section id="tab-case">
+  <h2>4. 新标签：点开后要跟过去</h2>
+  <a id="open-tab" href="m3_child.html" target="_blank">在新标签打开子页</a>
+</section>
+
+<section id="dialog-case">
+  <h2>5. 原生对话框</h2>
+  <button id="alert-btn">弹个提示</button>
+  <button id="confirm-btn">弹个确认</button>
+  <button id="prompt-btn">弹个输入</button>
+  <p id="dialog-log">对话框还没出现过</p>
+</section>
+
+<script>
+  const mark = text => { document.getElementById('mark').textContent = '标记：' + text; };
+
+  class M3Widget extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({mode: 'open'});
+      root.innerHTML = `
+        <p>影子区：未点击</p>
+        <button id="shadow-btn">影子按钮</button>`;
+      root.querySelector('#shadow-btn').addEventListener('click', () => {
+        root.querySelector('p').textContent = '影子区：已点击';
+        mark('影子按钮已点击');
+      });
+    }
+  }
+  customElements.define('m3-widget', M3Widget);
+
+  class M3Covered extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({mode: 'open'});
+      root.innerHTML = `<button id="covered-btn">被盖住的影子按钮</button>`;
+      root.querySelector('#covered-btn').addEventListener('click', () => mark('不该发生：被盖住的按钮被点到了'));
+    }
+  }
+  customElements.define('m3-covered', M3Covered);
+
+  const log = text => { document.getElementById('dialog-log').textContent = text; };
+  document.getElementById('alert-btn').addEventListener('click', () => {
+    alert('这是一条提示');
+    log('提示已关掉');
+  });
+  document.getElementById('confirm-btn').addEventListener('click', () => {
+    log(confirm('确定要继续吗？') ? '确认返回了 true' : '确认返回了 false');
+  });
+  document.getElementById('prompt-btn').addEventListener('click', () => {
+    log('输入返回：' + prompt('说点什么', '默认值'));
+  });
+</script>
+</body>
+</html>

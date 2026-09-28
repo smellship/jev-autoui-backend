@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-journal
+.smoke/
+.smoke-front/
+.smoke-real/
+.env
+artifacts/**
+!artifacts/.gitkeep
+secrets/*.local.yaml
+!secrets/.gitkeep
+.pytest_cache/
+.ruff_cache/

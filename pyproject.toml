@@ -1,0 +1,38 @@
+[project]
+name = "ui-backend"
+version = "0.1.0"
+description = "UI 测试平台后端：用例 / 环境 / 运行台账 + 调 ui_agent 内核（REST）"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy>=2.0.36",
+    "pydantic-settings>=2.7",
+    "pyyaml>=6.0.2",
+    "pyjwt>=2.10",
+    "ui-agent",
+]
+
+[tool.uv]
+package = false
+
+# 内核是本地副本（scripts/sync_kernel.py 单向同步）：装进同一个 venv，
+# 但平台仍然只以 argv 调它的 CLI，不 import 任何内核模块。
+[tool.uv.sources]
+ui-agent = { path = "kernel", editable = true }
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.9",
+    "httpx>=0.28",
+]

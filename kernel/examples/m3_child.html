@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>M3 子页</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 12px; }
+  button { font: inherit; padding: 4px 10px; }
+  .dropzone { width: 320px; border: 2px dashed #bbb; border-radius: 6px; padding: 12px;
+              text-align: center; color: #666; margin: 8px 0; cursor: pointer; }
+</style>
+</head>
+<body>
+<h2>子页已加载</h2>
+<button id="child-btn">子页按钮</button>
+<p id="child-out">子页按钮未点击</p>
+<div id="child-drop" class="dropzone">子页拖拽区
+  <input type="file" id="child-file" accept=".png,.pdf" hidden>
+</div>
+<p id="child-files">子页尚未收到文件</p>
+<script>
+  document.getElementById('child-btn').addEventListener('click', () => {
+    document.getElementById('child-out').textContent = '子页按钮已点击';
+  });
+
+  const zone = document.getElementById('child-drop');
+  const input = document.getElementById('child-file');
+  const out = document.getElementById('child-files');
+  const take = files => {
+    const names = [...files].map(f => f.name);
+    out.textContent = names.length ? '子页已收到：' + names.join('、') : '子页尚未收到文件';
+  };
+  input.addEventListener('change', () => { take(input.files); input.value = ''; });
+  zone.addEventListener('dragover', e => e.preventDefault());
+  zone.addEventListener('drop', e => { e.preventDefault(); take(e.dataTransfer.files); });
+</script>
+</body>
+</html>

@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>本地夹具 · 票据查询（离线，零模型调用）</title>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; margin: 0; padding: 24px; color: #222; }
+  .card { width: 460px; border: 1px solid #ddd; border-radius: 6px; padding: 16px 20px; }
+  label { display: block; margin: 10px 0 4px; }
+  input, select, button { font-size: 14px; padding: 6px 8px; }
+  input, select { width: 320px; }
+  button { cursor: pointer; }
+  #adv { margin-left: 8px; background: #fff; border: 1px solid #aaa; }
+  .spacer { height: 1300px; }
+  .covered-wrap { position: relative; height: 46px; }
+  #cover { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.25); }
+  table { border-collapse: collapse; margin-top: 10px; }
+  th, td { border: 1px solid #ccc; padding: 4px 14px; }
+  #status { color: #666; }
+  .dropzone { width: 420px; border: 2px dashed #bbb; border-radius: 6px; padding: 18px;
+              text-align: center; color: #666; cursor: pointer; margin: 8px 0; }
+  .error { color: #c00; }
+  section { margin-top: 24px; }
+</style>
+</head>
+<body>
+  <div class="card" id="login">
+    <h3>电子票据平台（本地夹具）</h3>
+    <label for="user">账号</label>
+    <input id="user" type="text" placeholder="请输入帐户名">
+    <label for="pwd">密码</label>
+    <input id="pwd" type="password" placeholder="请输入密码">
+    <label for="region">行政区域</label>
+    <select id="region">
+      <option value="">请选择省份</option>
+      <option value="2101">2101 沈阳</option>
+      <option value="2102">2102 大连</option>
+      <option value="2103" disabled>2103 鞍山（停用）</option>
+    </select>
+    <p><button id="submit" type="button">确 定</button>
+       <button id="reset" type="button" disabled>重 置</button></p>
+  </div>
+
+  <section id="main" hidden>
+    <h3>票据查询</h3>
+    <button id="query" type="button">查询</button>
+    <button id="adv" type="button">高级查询</button>
+    <div id="result" hidden>
+      <table>
+        <thead><tr><th>票据类型</th><th>缴款人</th></tr></thead>
+        <tbody><tr><td>医疗电子票据</td><td>大连市某单位</td></tr></tbody>
+      </table>
+    </div>
+    <p id="status">等待操作</p>
+    <div class="covered-wrap">
+      <button id="covered" type="button">被遮挡的按钮</button>
+      <div id="cover" title="遮挡层"></div>
+    </div>
+  </section>
+
+  <div class="spacer"></div>
+  <button id="below" type="button">下方按钮</button>
+
+  <section id="upload">
+    <h3>发票上传（本地夹具，限制与线上页一致）</h3>
+    <label for="folder">选择票夹</label>
+    <select id="folder">
+      <option>默认票夹</option>
+      <option>测试票夹</option>
+    </select>
+    <div id="dropzone" class="dropzone">将发票文件拖拽至此处 或 单击上传文件按钮 或 单击本框均可上传文件
+      <input type="file" id="invoice-file" accept=".pdf,.jpg,.jpeg,.png" multiple hidden>
+    </div>
+    <p><button id="pick" type="button">上传文件</button>
+       <button id="commit" type="button">提 交</button>
+       <button id="clear" type="button">清 空</button></p>
+    <p id="upload-error" class="error" hidden></p>
+    <p id="upload-status">暂无数据</p>
+    <table id="pending" hidden>
+      <thead><tr><th>序号</th><th>文件名</th><th>大小</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <p id="extra"><input type="file" id="extra-file" hidden>补充材料上传（未声明 accept）</p>
+    <p id="extra-error" class="error" hidden></p>
+    <p id="extra-status">暂无数据</p>
+  </section>
+
+<script>
+  const byId = id => document.getElementById(id);
+  byId('submit').addEventListener('click', () => {
+    byId('main').hidden = false;
+    byId('status').textContent = '已登录：' + byId('user').value;
+  });
+  byId('query').addEventListener('click', () => {
+    byId('result').hidden = false;
+    byId('status').textContent = '查询完成';
+  });
+  byId('adv').addEventListener('click', () => { byId('status').textContent = '进入高级查询'; });
+  byId('covered').addEventListener('click', () => { byId('status').textContent = '遮挡按钮被点到'; });
+  byId('below').addEventListener('click', () => { byId('status').textContent = '下方按钮已点击'; });
+
+  // --- 上传夹具：线上页的规则原样搬过来（格式 / 单文件大小 / 数量），负例在这一层拒绝 ---
+  const ALLOWED = ['pdf', 'jpg', 'jpeg', 'png'];
+  const MAX_IMAGE = 20 * 1024 * 1024, MAX_PDF = 10 * 1024 * 1024, MAX_COUNT = 50;
+  const extOf = name => (name.split('.').pop() || '').toLowerCase();
+  const mb = n => (n / 1024 / 1024).toFixed(0) + 'M';
+
+  function uploader(cfg) {
+    const input = byId(cfg.input), err = byId(cfg.error), status = byId(cfg.status);
+    const table = byId(cfg.table), body = table ? table.querySelector('tbody') : null;
+    const rows = [];
+    const show = msg => { err.hidden = !msg; err.textContent = msg; };
+    const render = () => {
+      if (table) {
+        body.innerHTML = rows.map((f, i) =>
+          `<tr><td>${i + 1}</td><td>${f.name}</td><td>${Math.ceil(f.size / 1024)}KB</td></tr>`).join('');
+        table.hidden = rows.length === 0;
+      }
+      status.textContent = rows.length ? `已选择 ${rows.length} 个文件` : '暂无数据';
+    };
+    const take = list => {
+      const files = [...list];
+      if (!files.length) return false;
+      for (const f of files) {
+        if (!ALLOWED.includes(extOf(f.name))) { show(`仅支持 pdf/jpg/jpeg/png 格式：${f.name}`); return false; }
+        const limit = extOf(f.name) === 'pdf' ? MAX_PDF : MAX_IMAGE;
+        if (f.size > limit) {
+          show(`${extOf(f.name) === 'pdf' ? '单个PDF' : '单个图片'}不能大于 ${mb(limit)}：${f.name}`);
+          return false;
+        }
+      }
+      if (rows.length + files.length > MAX_COUNT) { show(`最多可上传 ${MAX_COUNT} 个文件同时提交`); return false; }
+      show('');
+      rows.push(...files);
+      render();
+      return true;
+    };
+    input.addEventListener('change', () => { take(input.files); input.value = ''; });
+    return {input, rows, take, show};
+  }
+
+  const invoice = uploader({input: 'invoice-file', error: 'upload-error', status: 'upload-status',
+                            table: 'pending'});
+  const extra = uploader({input: 'extra-file', error: 'extra-error', status: 'extra-status'});
+
+  // 点按钮 / 点框 → 触发隐藏 input（线上页的真实路径）；拖入 → drop 事件
+  const wire = (zone, up) => {
+    zone.addEventListener('click', () => up.input.click());
+    zone.addEventListener('dragover', e => e.preventDefault());
+    zone.addEventListener('drop', e => { e.preventDefault(); up.take(e.dataTransfer.files); });
+  };
+  wire(byId('dropzone'), invoice);
+  wire(byId('extra'), extra);
+
+  byId('pick').addEventListener('click', () => invoice.input.click());
+  byId('commit').addEventListener('click', () => {
+    if (!invoice.rows.length) { invoice.show('请先选择文件'); return; }
+    invoice.show('');
+    byId('upload-status').textContent = `提交成功：${invoice.rows.length} 个文件`;
+  });
+  byId('clear').addEventListener('click', () => {
+    invoice.rows.length = 0;
+    byId('pending').hidden = true;
+    invoice.show('');
+    byId('upload-status').textContent = '暂无数据';
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# 密钥
+.env
+
+# 浏览器二进制（工作区内置，体积大）
+.browsers/
+
+# 运行产物：持久化 profile、trace、截图、报告
+.artifacts/

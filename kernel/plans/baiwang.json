@@ -1,0 +1,53 @@
+{
+  "name": "电子票据系统登录并查询大连票据列表",
+  "url": "",
+  "steps": [
+    {
+      "goal": "打开系统登录页，使用账号登录，完成登录后进入系统主页面",
+      "checks": [
+        {
+          "kind": "element_exists",
+          "value": "登录",
+          "expected": "",
+          "role": ""
+        }
+      ],
+      "url": "",
+      "note": "登录是第一个页面状态变化，提交动作是风险点"
+    },
+    {
+      "goal": "在查询条件中把行政区域选择为 2102 大连",
+      "checks": [
+        {
+          "kind": "element_value",
+          "value": "查询",
+          "expected": "2102",
+          "role": ""
+        }
+      ],
+      "url": "",
+      "note": "选择行政区域是查询前的必要筛选条件"
+    },
+    {
+      "goal": "点击查询，等待票据列表加载完成，页面上可见票据列表",
+      "checks": [
+        {
+          "kind": "text_contains",
+          "value": "票据列表",
+          "expected": "",
+          "role": ""
+        },
+        {
+          "kind": "element_exists",
+          "value": "查询",
+          "expected": "",
+          "role": ""
+        }
+      ],
+      "url": "",
+      "note": "提交查询并验证结果列表出现"
+    }
+  ],
+  "vars": {},
+  "notes": "登录凭证未在描述中给出，执行时需由 harness 提供"
+}
