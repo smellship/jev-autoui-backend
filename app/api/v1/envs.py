@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Response
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, Db
@@ -104,6 +104,8 @@ def delete_env(env_id: int, user: CurrentUser, db: Db) -> Response:
         raise ApiError(409, "env_in_use", "已有运行记录引用这个环境（台账要保留），不能删",
                        {"runs": runs})
     audit.log(db, user, "env.delete", "env", env.name, {})
+    # 页清单是探针缓存：随环境一起清（MySQL 外键会挡住带缓存的删除，SQLite 下则会留孤儿行）
+    db.execute(delete(PageInventory).where(PageInventory.env_id == env.id))
     db.delete(env)
     db.commit()
     return Response(status_code=204)

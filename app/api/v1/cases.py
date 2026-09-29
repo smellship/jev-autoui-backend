@@ -5,18 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 
 from fastapi import APIRouter, Response
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, Db
-from app.api.serializers import case_brief, iso, last_run_by_case
+from app.api.serializers import case_brief, case_list_items, iso, last_run_by_case
 from app.core.config import get_settings
 from app.core.errors import not_found
-from app.models import Case, CaseVersion, Scenario, utcnow
+from app.models import Case, CaseVersion, Node, Scenario, utcnow
 from app.schemas import CaseCopy, CaseDraft, CaseImport, CaseRollback, CaseSave, CaseValidate
 from app.services import audit, case_service
 
 router = APIRouter(prefix="/cases", tags=["cases"])
+PAGE_MAX = 200
 
 
 def get_case(db: Session, code: str) -> Case:
@@ -33,6 +34,46 @@ def _env_name(db: Session, scenario: Scenario | None) -> str:
 
     env = db.get(Env, scenario.env_id)
     return env.name if env else ""
+
+
+def _descendant_node_ids(db: Session, node_id: int) -> list[int]:
+    """节点筛选含子孙：点父节点也能看到下面各级场景里的用例。"""
+    nodes = db.scalars(select(Node).where(Node.deleted_at.is_(None))).all()
+    children: dict[int | None, list[int]] = {}
+    for node in nodes:
+        children.setdefault(node.parent_id, []).append(node.id)
+    out: list[int] = []
+    stack = [node_id]
+    while stack:
+        current = stack.pop()
+        out.append(current)
+        stack.extend(children.get(current, []))
+    return out
+
+
+@router.get("")
+def list_cases(user: CurrentUser, db: Db, node_id: int | None = None, scenario_id: str = "",
+               q: str = "", page: int = 1, size: int = 50) -> dict:
+    """全局用例列表（场景管理的用例池选择器）：跨场景，可按节点/场景/关键字过滤。"""
+    size = max(1, min(size, PAGE_MAX))
+    query = select(Case).where(Case.deleted_at.is_(None))
+    if scenario_id:
+        scenario = db.scalar(select(Scenario).where(Scenario.code == scenario_id,
+                                                    Scenario.deleted_at.is_(None)))
+        if scenario is None:
+            raise not_found("场景", scenario_id)
+        query = query.where(Case.scenario_id == scenario.id)
+    if node_id is not None:
+        query = query.where(Case.scenario_id.in_(
+            select(Scenario.id).where(Scenario.node_id.in_(_descendant_node_ids(db, node_id)),
+                                      Scenario.deleted_at.is_(None))))
+    if q:
+        query = query.where(or_(Case.name.contains(q), Case.code.contains(q)))
+    total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
+    rows = list(db.scalars(query.order_by(Case.id.desc())
+                           .offset((max(1, page) - 1) * size).limit(size)).all())
+    runs = last_run_by_case(db, [case.id for case in rows])
+    return {"items": case_list_items(db, rows, runs), "total": total, "page": page, "size": size}
 
 
 @router.get("/{case_id}")

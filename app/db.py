@@ -78,11 +78,32 @@ def _patch_user_table() -> None:
                      {"account": get_settings().admin_account})
 
 
+def _patch_run_table() -> None:
+    """老库补列：run 缺 batch_code/suite_id 时补上（批次/套件）。
+
+    补丁列不带外键（SQLite/MySQL 老库都能跑）；新建库由 create_all 直接带全。
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "run" not in insp.get_table_names():
+        return
+    cols = {col["name"] for col in insp.get_columns("run")}
+    with engine.begin() as conn:
+        if "batch_code" not in cols:
+            conn.execute(text("ALTER TABLE run ADD COLUMN batch_code VARCHAR(40) NULL"))
+            conn.execute(text("CREATE INDEX ix_run_batch_code ON run (batch_code)"))
+        if "suite_id" not in cols:
+            conn.execute(text("ALTER TABLE run ADD COLUMN suite_id INT NULL"))
+            conn.execute(text("CREATE INDEX ix_run_suite_id ON run (suite_id)"))
+
+
 def init_db() -> None:
     from app.models import Run, User
 
     Base.metadata.create_all(engine)
     _patch_user_table()
+    _patch_run_table()
     with session_scope() as db:
         settings = get_settings()
         user = db.scalar(select(User).where(User.account == settings.admin_account))

@@ -92,6 +92,32 @@ class CaseVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Suite(Base):
+    """场景套件：命名 + 有序用例列表（场景管理）。"""
+
+    __tablename__ = "suite"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), unique=True, index=True)  # su-0001
+    name: Mapped[str] = mapped_column(String(128))
+    owner: Mapped[str] = mapped_column(String(64), default="")
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    description: Mapped[str] = mapped_column(Text, default="")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class SuiteCase(Base):
+    """套件 ↔ 用例的有序引用（sort 即串跑顺序）。"""
+
+    __tablename__ = "suite_case"
+    __table_args__ = (UniqueConstraint("suite_id", "case_id", name="uq_suite_case"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    suite_id: Mapped[int] = mapped_column(ForeignKey("suite.id"), index=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("case.id"), index=True)
+    sort: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class Env(Base):
     __tablename__ = "env"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -126,6 +152,8 @@ class Run(Base):
     plan_json: Mapped[str] = mapped_column(Text, default="")  # 本次运行编译出的 TestPlan（同一份）
     artifact_dir: Mapped[str] = mapped_column(String(255), default="")
     triggered_by: Mapped[str] = mapped_column(String(64), default="")
+    batch_code: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)  # b-20260929-150211
+    suite_id: Mapped[int | None] = mapped_column(ForeignKey("suite.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

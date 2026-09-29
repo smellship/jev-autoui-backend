@@ -8,7 +8,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Case, Node, Run, Scenario
+from app.models import Case, Node, Run, Scenario, Suite, SuiteCase
 from app.services import run_service
 
 
@@ -66,6 +66,7 @@ def run_brief(run: Run, position: int | None = None) -> dict:
     return {
         "id": run.code, "case_id": run.case_code, "case_name": run.case_name,
         "scenario_name": run.scenario_name, "env": run.env_name, "mode": run.mode,
+        "batch_code": run.batch_code or "",
         "status": run.status, "kernel_status": run.kernel_status, "detail": run.detail,
         "steps": run.steps, "created_at": iso(run.created_at), "started_at": iso(run.started_at),
         "finished_at": iso(run.finished_at), "duration_ms": run.duration_ms,
@@ -157,6 +158,81 @@ def case_count_by_scenario(db: Session, scenario_ids: list[int]) -> dict[int, in
     rows = db.execute(select(Case.scenario_id, func.count()).where(
         Case.deleted_at.is_(None), Case.scenario_id.in_(scenario_ids)).group_by(Case.scenario_id)).all()
     return {scenario_id: count for scenario_id, count in rows}
+
+
+def case_count_by_suite(db: Session, suite_ids: list[int]) -> dict[int, int]:
+    if not suite_ids:
+        return {}
+    rows = db.execute(select(SuiteCase.suite_id, func.count())
+                      .join(Case, Case.id == SuiteCase.case_id)
+                      .where(SuiteCase.suite_id.in_(suite_ids), Case.deleted_at.is_(None))
+                      .group_by(SuiteCase.suite_id)).all()
+    return {suite_id: count for suite_id, count in rows}
+
+
+def case_list_items(db: Session, cases: list[Case], runs: dict[int, Run]) -> list[dict]:
+    """用例列表项：case_brief + 场景名（选择器 / 套件面板共用）。"""
+    scenario_ids = {case.scenario_id for case in cases}
+    scenarios = (db.scalars(select(Scenario).where(Scenario.id.in_(scenario_ids))).all()
+                 if scenario_ids else [])
+    by_id = {row.id: row for row in scenarios}
+    items = []
+    for case in cases:
+        scenario = by_id.get(case.scenario_id)
+        items.append(case_brief(case, runs.get(case.id)) | {
+            "scenario_code": scenario.code if scenario else "",
+            "scenario_name": scenario.name if scenario else ""})
+    return items
+
+
+def suite_brief(suite: Suite, case_count: int = 0, last_batch: dict | None = None) -> dict:
+    return {
+        "id": suite.code, "name": suite.name, "owner": suite.owner, "tags": suite.tags or [],
+        "description": suite.description, "case_count": case_count, "last_batch": last_batch,
+        "created_at": iso(suite.created_at), "updated_at": iso(suite.updated_at),
+    }
+
+
+def batch_counts(runs: list[Run]) -> dict:
+    counts = {name: 0 for name in ("queued", "running", "passed", "failed", "aborted",
+                                   "unverified", "error")}
+    for run in runs:
+        counts[run.status] = counts.get(run.status, 0) + 1
+    return counts
+
+
+def batch_summary(db: Session, code: str, runs: list[Run]) -> dict:
+    suite = db.get(Suite, runs[0].suite_id) if runs[0].suite_id else None
+    first = runs[0]
+    return {
+        "code": code, "label": suite.name if suite else "临时串跑",
+        "suite_id": suite.code if suite else None,
+        "env": first.env_name, "mode": first.mode, "triggered_by": first.triggered_by,
+        "created_at": iso(first.created_at), "total": len(runs),
+        "done": all(run.status in run_service.TERMINAL for run in runs),
+        "counts": batch_counts(runs),
+    }
+
+
+def batch_brief(db: Session, code: str, runs: list[Run]) -> dict:
+    data = batch_summary(db, code, runs)
+    current = next((run for run in runs if run.status == "running"), None)
+    data["current"] = run_brief(current) if current else None
+    data["items"] = [run_brief(run) for run in runs]
+    return data
+
+
+def last_batch_by_suite(db: Session, suite_ids: list[int]) -> dict[int, dict]:
+    out: dict[int, dict] = {}
+    for suite_id in suite_ids:
+        last = db.scalar(select(Run).where(Run.suite_id == suite_id, Run.batch_code.is_not(None))
+                         .order_by(Run.id.desc()))
+        if last is None or not last.batch_code:
+            continue
+        runs = list(db.scalars(select(Run).where(Run.batch_code == last.batch_code)
+                               .order_by(Run.id)).all())
+        out[suite_id] = batch_summary(db, last.batch_code, runs)
+    return out
 
 
 def node_codes(nodes: list[Node]) -> dict[int, Node]:

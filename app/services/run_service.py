@@ -13,9 +13,9 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.errors import ApiError
+from app.core.errors import ApiError, not_found
 from app.db import session_scope
-from app.models import Case, Env, PageInventory, Run, Scenario, utcnow
+from app.models import Case, Env, PageInventory, Run, Scenario, Suite, utcnow
 from app.services import audit, case_service, secret_store
 from app.services.kernel_client import KernelError, KernelProcess
 
@@ -126,6 +126,15 @@ def scenario_name(db: Session, case: Case) -> str:
     return scenario.name if scenario else ""
 
 
+def _prepare_plan(case: Case, env: Env, base: str) -> tuple[dict, list[str]]:
+    """编译用例（guard）→ 补默认 url → 解析 vars；返回 (plan, 缺失引用)。"""
+    result = case_service.guard(case.yaml_text, list(env.secret_keys or []))
+    plan = dict(result["plan"] or {})
+    plan.setdefault("url", base)
+    _, missing = secret_store.resolve_vars(plan.get("vars") or {}, env, env.name)
+    return plan, missing
+
+
 def create_run(db: Session, case: Case, env: Env, mode: str, user) -> Run:
     """校验 → 解析密钥 → 落 run 台账（queued）→ 入队。"""
     if mode not in ("debug", "ci"):
@@ -134,10 +143,7 @@ def create_run(db: Session, case: Case, env: Env, mode: str, user) -> Run:
     if not base:
         raise ApiError(409, "env_unconfigured", f"环境「{env.name}」还没有配置地址，请到环境管理补齐",
                        {"env": env.name})
-    result = case_service.guard(case.yaml_text, list(env.secret_keys or []))
-    plan = dict(result["plan"] or {})
-    plan.setdefault("url", base)
-    _, missing = secret_store.resolve_vars(plan.get("vars") or {}, env, env.name)
+    plan, missing = _prepare_plan(case, env, base)
     if missing:
         raise ApiError(409, "var_unresolved", "用例引用的密钥/环境变量在服务器上不存在",
                        {"missing": missing, "env": env.name})
@@ -155,6 +161,72 @@ def create_run(db: Session, case: Case, env: Env, mode: str, user) -> Run:
     db.commit()
     queue.submit(run.id)
     return run
+
+
+def _unique_batch_code(db: Session) -> str:
+    base = f"b-{datetime.now():%Y%m%d-%H%M%S}"
+    code, n = base, 1
+    while db.scalar(select(Run).where(Run.batch_code == code)) is not None:
+        n += 1
+        code = f"{base}-{n}"
+    return code
+
+
+def create_batch(db: Session, cases: list[Case], env: Env, mode: str, user,
+                 suite: Suite | None = None) -> tuple[str, list[Run]]:
+    """批量建 run（同一 batch_code 按序入队）。先整体校验：任一不过则整批不建。"""
+    if mode not in ("debug", "ci"):
+        raise ApiError(422, "bad_mode", "mode 只能是 debug 或 ci", {"mode": mode})
+    unique: list[Case] = []
+    seen: set[int] = set()
+    for case in cases:
+        if case.id not in seen:
+            seen.add(case.id)
+            unique.append(case)
+    if not unique:
+        raise ApiError(422, "batch_empty", "批次里至少要有 1 个用例")
+    base = secret_store.base_url(env)
+    if not base:
+        raise ApiError(409, "env_unconfigured", f"环境「{env.name}」还没有配置地址，请到环境管理补齐",
+                       {"env": env.name})
+    problems: list[dict] = []
+    prepared: list[tuple[Case, dict]] = []
+    for case in unique:
+        try:
+            plan, missing = _prepare_plan(case, env, base)
+        except ApiError as exc:
+            problems.append({"case": case.code, "name": case.name, "code": exc.code,
+                             "message": exc.message, "detail": exc.detail})
+            continue
+        if missing:
+            problems.append({"case": case.code, "name": case.name, "code": "var_unresolved",
+                             "message": "用例引用的密钥/环境变量在服务器上不存在",
+                             "detail": {"missing": missing}})
+            continue
+        prepared.append((case, plan))
+    if problems:
+        raise ApiError(422, "batch_invalid", "有用例没通过校验，批次未创建", {"problems": problems})
+    batch_code = _unique_batch_code(db)
+    runs: list[Run] = []
+    for case, plan in prepared:
+        code = _unique_code(db, case)
+        run = Run(
+            code=code, case_id=case.id, env_id=env.id, case_code=case.code, case_name=case.name,
+            scenario_name=scenario_name(db, case), env_name=env.name, mode=mode, status="queued",
+            steps=len(plan.get("steps") or []), plan_json=json.dumps(plan, ensure_ascii=False),
+            artifact_dir=str(get_settings().runs_dir / code), triggered_by=actor(user),
+            batch_code=batch_code, suite_id=suite.id if suite else None,
+        )
+        db.add(run)
+        db.flush()
+        runs.append(run)
+    audit.log(db, user, "batch.create", "batch", batch_code,
+              {"total": len(runs), "env": env.name, "mode": mode,
+               "suite": suite.code if suite else "", "cases": [case.code for case, _ in prepared]})
+    db.commit()
+    for run in runs:
+        queue.submit(run.id)
+    return batch_code, runs
 
 
 def queue_position(db: Session, run: Run) -> int | None:
@@ -300,6 +372,35 @@ def stop(db: Session, run: Run, user=None) -> dict:
     if proc is not None:
         proc.kill()
     return {"id": run.code, "status": "aborted", "detail": detail}
+
+
+def stop_batch(db: Session, batch_code: str, user=None) -> dict:
+    """批次停止：运行中的杀掉，未跑的置 aborted；已是终态则 409。"""
+    runs = list(db.scalars(select(Run).where(Run.batch_code == batch_code).order_by(Run.id)).all())
+    if not runs:
+        raise not_found("批次", batch_code)
+    now = utcnow()
+    aborted = 0
+    for run in runs:
+        values: dict = {"status": "aborted", "finished_at": now, "detail": "批次停止：未执行"}
+        if run.status == "running":
+            values["detail"] = "批次停止：子进程树已终止，产物可能不完整（partial）"
+            if run.started_at:
+                values["duration_ms"] = int((now - run.started_at).total_seconds() * 1000)
+        changed = db.execute(update(Run).where(Run.id == run.id, Run.status.in_(ACTIVE))
+                             .values(**values).execution_options(synchronize_session=False))
+        aborted += changed.rowcount
+    if aborted == 0:
+        db.rollback()
+        raise ApiError(409, "batch_not_active", "批次已是终态", {"code": batch_code})
+    audit.log(db, user, "batch.stop", "batch", batch_code, {"aborted": aborted})
+    db.commit()  # 先把 aborted 落库再杀进程：worker 收尾时不会把状态盖回去
+    for run in runs:  # 全量查进程表：覆盖"刚被 worker 认领、又刚好被跳过"的竞态
+        with _lock:
+            proc = _procs.get(run.id)
+        if proc is not None:
+            proc.kill()
+    return {"id": batch_code, "status": "aborted", "aborted": aborted}
 
 
 def regenerate_report(db: Session, run: Run, user=None) -> dict:

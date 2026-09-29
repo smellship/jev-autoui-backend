@@ -11,7 +11,11 @@ ROOT = Path(__file__).resolve().parent.parent
 TMP = Path(tempfile.mkdtemp(prefix="uiweb-test-"))
 FAKE_KERNEL = ROOT / "scripts" / "fake_kernel.py"
 
-os.environ["UI_WEB_DB_URL"] = f"sqlite:///{(TMP / 'test.db').as_posix()}"
+# 默认：一次性临时 SQLite。要跑外部库（如本地 MySQL）就设 UI_WEB_TEST_DB_URL：
+#   mysql+pymysql://root:pwd@127.0.0.1:3306/ui_web_test?charset=utf8mb4
+# 外部库每次开跑前会被清空重建（drop_all → 启动时 create_all），保证空库开跑。
+EXTERNAL_DB_URL = os.environ.get("UI_WEB_TEST_DB_URL", "")
+os.environ["UI_WEB_DB_URL"] = EXTERNAL_DB_URL or f"sqlite:///{(TMP / 'test.db').as_posix()}"
 os.environ["UI_WEB_ARTIFACTS_DIR"] = str(TMP / "artifacts")
 os.environ["UI_WEB_SECRETS_DIR"] = str(TMP / "secrets")
 os.environ["UI_WEB_KERNEL_CMD"] = f'"{sys.executable}" "{FAKE_KERNEL}"'
@@ -25,7 +29,13 @@ sys.path.insert(0, str(ROOT))
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from app import models  # noqa: E402,F401  （注册全部表，供外部库清库用）
+from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
+
+if EXTERNAL_DB_URL:
+    Base.metadata.drop_all(engine)  # 外部库：清空重来，不受上一次运行的数据影响
+    print(f"[conftest] 外部测试库已清空：{EXTERNAL_DB_URL.split('@')[-1]}")
 
 CASE_YAML = """id: sc-0000-01
 title: 冒烟用例

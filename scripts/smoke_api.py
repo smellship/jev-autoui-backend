@@ -1,10 +1,11 @@
 """本地接口冒烟：真起 uvicorn（指向内核桩）+ 真打 HTTP，走完 spec 的主流程。
 
-- 数据全落 .smoke/，可反复跑；不联网、不调模型、不起浏览器；
+- 数据默认落 .smoke/（SMOKE_DB_URL 可切外部库，如本地 MySQL，开跑前清空重建），
+  可反复跑；不联网、不调模型、不起浏览器；
 - 覆盖：登录鉴权 / 用户管理（自助改密 + 管理员围墙）/ 分类树 / 场景 / 用例 / 校验 /
   保存与乐观锁 / TestPlan 预览 / 自然语言草稿 / 环境与密钥（只写不读）/ 探针与页清单 /
   运行（debug·ci·失败·停止）/ SSE 实时事件 / 产物与报告（含路径穿越）/ 版本回滚 /
-  复制与软删除 / 明文泄漏扫描。
+  场景管理（套件 + 批次串跑：失败继续 / 进度聚合 / 批次停止）/ 复制与软删除 / 明文泄漏扫描。
 
 用法：uv run python scripts/smoke_api.py
 """
@@ -15,16 +16,26 @@ import json
 import os
 import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import httpx
+from sqlalchemy import create_engine, text
 
 ROOT = Path(__file__).resolve().parent.parent
 SMOKE = ROOT / ".smoke"
+# 默认 SQLite 落 .smoke/；要跑外部库（如本地 MySQL）设 SMOKE_DB_URL，例：
+#   mysql+pymysql://root:pwd@127.0.0.1:3306/ui_web_smoke?charset=utf8mb4
+DB_URL = os.environ.get("SMOKE_DB_URL", f"sqlite:///{(SMOKE / 'smoke.db').as_posix()}")
+
+
+def db_label() -> str:
+    """日志里的库标识：MySQL URL 隐去账号口令，SQLite 只留文件名。"""
+    return DB_URL.split("@")[-1] if "@" in DB_URL else DB_URL.rsplit("/", 1)[-1]
+
+
 PORT = int(os.environ.get("SMOKE_PORT", "8791"))
 BASE = f"http://127.0.0.1:{PORT}"
 API = f"{BASE}/api/v1"
@@ -124,6 +135,16 @@ def wait_run(smoke: Smoke, run_id: str, timeout: float = 60.0) -> dict:
             return data
         time.sleep(0.4)
     raise TimeoutError(f"运行 {run_id} 超时未结束")
+
+
+def wait_batch(smoke: Smoke, code: str, timeout: float = 60.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        data = expect(smoke.call("GET", f"/batches/{code}"), 200, "批次详情")
+        if data["done"]:
+            return data
+        time.sleep(0.4)
+    raise TimeoutError(f"批次 {code} 超时未结束")
 
 
 def read_sse(smoke: Smoke, run_id: str, timeout: float = 20.0) -> list[str]:
@@ -401,6 +422,60 @@ def step_versions(smoke: Smoke) -> str:
     return f"共 {versions['total']} 版；回滚=前滚到 v{rolled['version']}（历史不丢）"
 
 
+def step_scene_suite(smoke: Smoke) -> str:
+    """场景管理：套件 CRUD + 有序引用 + 串跑（失败继续 + 进度聚合 + 台账批次）。"""
+    suite = expect(smoke.call("POST", "/suites", json={
+        "name": "每日串跑", "description": "冒烟批次套件"}), 201, "建套件")
+    smoke.ids["suite"] = suite["id"]
+    saved = expect(smoke.call("PUT", f"/suites/{suite['id']}/cases", json={
+        "case_ids": [smoke.ids["case_fail"], smoke.ids["case"]]}), 200, "保存有序用例")
+    assert saved["count"] == 2, saved
+    detail = expect(smoke.call("GET", f"/suites/{suite['id']}"), 200, "套件详情")
+    assert [item["id"] for item in detail["items"]] == [smoke.ids["case_fail"], smoke.ids["case"]], detail
+    assert detail["missing"] == [], detail
+    bad = smoke.call("PUT", f"/suites/{suite['id']}/cases",
+                     json={"case_ids": [smoke.ids["case"], "sc-9999-99"]})
+    assert bad.status_code == 409 and bad.json()["code"] == "case_invalid", bad.text
+
+    started = expect(smoke.call("POST", f"/suites/{suite['id']}/run", json={
+        "env_id": smoke.ids["env"], "mode": "debug"}), 202, "运行套件")
+    assert started["label"] == "每日串跑" and started["total"] == 2, started
+    data = wait_batch(smoke, started["code"])
+    assert data["done"] and data["counts"]["passed"] == 1 and data["counts"]["failed"] == 1, data
+    ledger = expect(smoke.call("GET", f"/runs?batch_code={started['code']}"), 200, "批次台账")
+    assert ledger["total"] == 2, ledger
+    listed = expect(smoke.call("GET", "/suites?q=每日"), 200, "套件列表")
+    row = next(item for item in listed["items"] if item["id"] == suite["id"])
+    assert row["last_batch"]["code"] == started["code"], row
+    return (f"{suite['id']} 两例串跑（失败继续）：通过 1 / 失败 1，"
+            f"批次 {started['code']} 台账 2 条")
+
+
+def step_batch_stop(smoke: Smoke) -> str:
+    """即席串跑（任意用例）被中途停止：aborted 全部落地，终态再停 409。"""
+    started = expect(smoke.call("POST", "/batches", json={
+        "case_ids": [smoke.ids["case"]], "env_id": smoke.ids["env"], "mode": "debug"}),
+        202, "即席串跑(待停止)")
+    assert started["label"] == "临时串跑" and started["suite_id"] is None, started
+    code = started["code"]
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        data = expect(smoke.call("GET", f"/batches/{code}"), 200, "批次详情")
+        if any(item["status"] == "running" for item in data["items"]):
+            break
+        assert data["counts"]["queued"] + data["counts"]["running"] >= 1, data
+        time.sleep(0.05)
+    else:
+        raise AssertionError("批次一直没进入 running")
+    stopped = expect(smoke.call("POST", f"/batches/{code}/stop"), 200, "停止批次")
+    assert stopped["status"] == "aborted" and stopped["aborted"] >= 1, stopped
+    data = wait_batch(smoke, code)
+    assert data["counts"]["aborted"] == 1, data
+    again = smoke.call("POST", f"/batches/{code}/stop")
+    assert again.status_code == 409 and again.json()["code"] == "batch_not_active", again.text
+    return f"{code} 停止 → aborted；内容留痕；再次停止 409"
+
+
 def step_delete(smoke: Smoke) -> str:
     expect(smoke.call("DELETE", f"/cases/{smoke.ids['case']}"), 204, "软删除用例")
     expect(smoke.call("GET", f"/cases/{smoke.ids['case']}"), 404, "删除后详情")
@@ -412,13 +487,17 @@ def step_delete(smoke: Smoke) -> str:
 
 
 def step_audit_and_leak(smoke: Smoke) -> str:
-    db_path = SMOKE / "smoke.db"
-    with sqlite3.connect(db_path) as conn:
-        actions = [row[0] for row in conn.execute("SELECT action FROM audit_log").fetchall()]
+    engine = create_engine(DB_URL)
+    try:
+        with engine.connect() as conn:
+            actions = [row[0] for row in conn.execute(text("SELECT action FROM audit_log")).fetchall()]
+    finally:
+        engine.dispose()
     for expected in ("auth.login", "node.create", "scenario.create", "case.save", "case.delete",
                      "env.secrets", "env.probe", "run.create", "run.stop",
                      "user.create", "user.profile", "user.password", "user.update",
-                     "user.reset_password"):
+                     "user.reset_password", "suite.create", "suite.set_cases",
+                     "batch.create", "batch.stop"):
         assert expected in actions, f"审计缺 {expected}：{sorted(set(actions))}"
     leaked = []
     for path in SMOKE.rglob("*"):
@@ -436,10 +515,28 @@ def step_audit_and_leak(smoke: Smoke) -> str:
             f"secrets/ 之外（db / 产物 / 日志）均无密钥明文")
 
 
+def reset_db() -> None:
+    """外部库（SMOKE_DB_URL）：DROP/CREATE 同名库，空库开跑；SQLite 的库文件随 .smoke 目录一起删。"""
+    if DB_URL.startswith("sqlite"):
+        return
+    import pymysql
+    from sqlalchemy.engine import make_url
+
+    url = make_url(DB_URL)
+    conn = pymysql.connect(host=url.host, port=url.port or 3306, user=url.username,
+                           password=url.password, charset="utf8mb4")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP DATABASE IF EXISTS `{url.database}`")
+            cur.execute(f"CREATE DATABASE `{url.database}` CHARACTER SET utf8mb4")
+    finally:
+        conn.close()
+
+
 def start_server() -> subprocess.Popen:
     env = os.environ.copy()
     env.update({
-        "UI_WEB_DB_URL": f"sqlite:///{(SMOKE / 'smoke.db').as_posix()}",
+        "UI_WEB_DB_URL": DB_URL,
         "UI_WEB_ARTIFACTS_DIR": str(SMOKE / "artifacts"),
         "UI_WEB_SECRETS_DIR": str(SMOKE / "secrets"),
         "UI_WEB_KERNEL_CMD": f'"{sys.executable}" "{ROOT / "scripts" / "fake_kernel.py"}"',
@@ -486,11 +583,12 @@ def main() -> int:
     shutil.rmtree(SMOKE, ignore_errors=True)
     (SMOKE / "artifacts" / "runs").mkdir(parents=True)
     (SMOKE / "secrets").mkdir(parents=True)
+    reset_db()
     proc = start_server()
     smoke = Smoke()
     try:
         wait_health()
-        print(f"服务已起：{BASE}（数据在 {SMOKE}）\n")
+        print(f"服务已起：{BASE}（库={db_label()}，产物在 {SMOKE}）\n")
         smoke.step("健康检查 / 队列状态", lambda: step_health(smoke))
         smoke.step("登录与鉴权（401 / 错误口令 / me）", lambda: step_auth(smoke))
         smoke.step("用户管理（自助改密 + 管理员围墙）", lambda: step_users(smoke))
@@ -510,6 +608,8 @@ def main() -> int:
         smoke.step("停止运行（aborted）", lambda: step_stop(smoke))
         smoke.step("运行台账筛选", lambda: step_runs_list(smoke))
         smoke.step("版本列表 / 回滚", lambda: step_versions(smoke))
+        smoke.step("场景管理：套件 + 批次串跑（失败继续）", lambda: step_scene_suite(smoke))
+        smoke.step("批次停止（aborted / 再停 409）", lambda: step_batch_stop(smoke))
         smoke.step("软删除用例（台账保留）", lambda: step_delete(smoke))
         smoke.step("审计落库 + 全目录密钥明文扫描", lambda: step_audit_and_leak(smoke))
         return smoke.report()

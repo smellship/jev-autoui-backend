@@ -8,6 +8,8 @@ from app.models.tables import (
     Run,
     Scenario,
     Seq,
+    Suite,
+    SuiteCase,
     User,
     utcnow,
 )
@@ -22,6 +24,8 @@ __all__ = [
     "Run",
     "Scenario",
     "Seq",
+    "Suite",
+    "SuiteCase",
     "User",
     "utcnow",
 ]

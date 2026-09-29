@@ -123,6 +123,39 @@ class RunIn(BaseModel):
     mode: str = "debug"
 
 
+class SuiteIn(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    owner: str = ""
+    tags: list[str] = Field(default_factory=list)
+    description: str = ""
+
+
+class SuitePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    owner: str | None = None
+    tags: list[str] | None = None
+    description: str | None = None
+
+
+class SuiteCopy(BaseModel):
+    name: str | None = None
+
+
+class SuiteCasesIn(BaseModel):
+    case_ids: list[str] = Field(default_factory=list)
+
+
+class SuiteRunIn(BaseModel):
+    env_id: int
+    mode: str = "debug"
+
+
+class BatchIn(BaseModel):
+    case_ids: list[str] = Field(min_length=1)
+    env_id: int
+    mode: str = "debug"
+
+
 class ProfileIn(BaseModel):
     name: str
 

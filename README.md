@@ -62,12 +62,17 @@ uv run pytest -q               # 单测：TestClient + 内核桩 + 保留策略�
 uv run pytest kernel/tests -q  # 内核自带的离线单测（零模型、零浏览器）
 uv run python scripts/smoke_api.py         # 接口冒烟：真起 uvicorn + 真打 HTTP（内核桩），数据落 .smoke/
 uv run python scripts/smoke_kernel_real.py # 真内核联调：UI_WEB_KERNEL_CMD 指向 kernel/ 副本，数据落 .smoke-real/
+
+# 单测/冒烟也可以跑在外部库（如本机 MySQL）：测试库每次开跑前会被清空重建，口令只在本机用
+UI_WEB_TEST_DB_URL="mysql+pymysql://root:<本地口令>@127.0.0.1:3306/ui_web_test?charset=utf8mb4" uv run pytest -q
+SMOKE_DB_URL="mysql+pymysql://root:<本地口令>@127.0.0.1:3306/ui_web_smoke?charset=utf8mb4" uv run python scripts/smoke_api.py
 ```
 
-冒烟覆盖主流程 21 项：健康检查 / 登录鉴权 / 用户管理（自助改密 + 管理员围墙）/ 分类树 /
+冒烟覆盖主流程 23 项：健康检查 / 登录鉴权 / 用户管理（自助改密 + 管理员围墙）/ 分类树 /
 环境与密钥（只写不读）/ 探针与页清单 / 用例校验（错误码+行号）/ 保存与乐观锁 409 / TestPlan 预览 /
 自然语言草稿 / 运行（debug·ci·失败·停止）/ SSE 实时事件 / 产物与报告（含路径穿越）/ 运行台账筛选 /
-版本回滚 / 软删除 / 审计落库 + 全目录密钥明文扫描。
+版本回滚 / 软删除 / 场景管理（套件 + 批次串跑，失败继续）/ 批次停止（aborted / 再停 409）/
+审计落库 + 全目录密钥明文扫描。
 
 `smoke_kernel_real.py` 是**不调模型**的真内核联调（没有 API key 也能跑）：起真 uvicorn 指向 `kernel/` 副本，
 打本地夹具页做探针、跑一条入口连不上的用例（内核退出码 1 也要被平台正确回读成 `error`）、
@@ -144,12 +149,13 @@ app/
 │   ├─ kernel_client.py    内核子进程：argv 数组、JSON 解析、日志落盘、进程树终止
 │   ├─ secret_store.py     secrets/<env>.local.yaml（只写不读、${{secret.X}}/${{env.X}} 解析）
 │   ├─ case_service.py     YAML ↔ TestPlan：校验 / 保存版本 / 回滚 / 草稿
-│   ├─ run_service.py      串行队列 + 状态映射 + 页清单登记 + 停止 / 重出报告
+│   ├─ suite_service.py    串跑套件（场景管理）：CRUD / 有序清单 / 引用校验 / 存清单
+│   ├─ run_service.py      串行队列 + 状态映射 + 页清单登记 + 停止 / 重出报告 + 批次（同 batch_code 按序入队 / 停止批次）
 │   ├─ retention.py        保留策略（§13）
 │   └─ audit.py            审计
 ├─ importers/
 │   └─ midscene.py         老脚本（midscene）→ 用例 YAML：前瞻断言 / vars / 报告（离线）
-└─ api/v1/                 auth · nodes · scenarios · cases · envs · runs（含 SSE）
+└─ api/v1/                 auth · nodes · scenarios · cases · suites · batches · envs · runs（含 SSE）
 kernel/                    内核副本（源仓库 ui_agent 的单向同步，见 KERNEL_SOURCE.md）
 scripts/                   sync_kernel.py（同步内核）· fake_kernel.py（内核桩）· init_db.py · import_midscene.py（脚本导入）· smoke_api.py · smoke_kernel_real.py
 tests/                     conftest（临时库+桩）· kernel_client · core/secrets · case_service · midscene 导入 · api_flow · retention
@@ -165,13 +171,18 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
 | GET/POST | `/nodes` · PATCH/DELETE `/nodes/{id}` | 分类树 |
 | GET/POST | `/scenarios` · GET/PATCH/DELETE `/scenarios/{id}` | 场景 |
 | GET/POST | `/scenarios/{id}/cases` | 场景下用例列表 / 新建 |
+| GET | `/cases` | 全局用例池（场景管理选择器）：`node_id` / `scenario_id` / `q` 过滤，跨场景 |
 | GET/PUT | `/cases/{id}` | 详情 / 保存（乐观锁 409、校验 422、成功留版本） |
 | POST | `/cases/{id}/validate` · `/drafts` · `/imports` | 校验+TestPlan / 自然语言草稿 / 老脚本（midscene.js）导入（都不落库） |
 | GET/POST | `/cases/{id}/versions…` · `/rollback` · `/copy` | 版本 / 回滚（前滚）/ 复制 |
 | GET/POST/PATCH/DELETE | `/envs…` | 环境；`PUT /envs/{id}/secrets` 只写不读、`DELETE /envs/{id}/secrets/{key}` 删键；`POST /envs/{id}/probe` 探针；`GET /envs/{id}/pages` 页清单 |
-| POST/GET | `/runs` | 发起（202 入队）/ 台账（case_id、status、mode、时间筛选） |
+| GET/POST | `/suites` · GET/PATCH/DELETE `/suites/{id}` | 串跑套件（场景管理）：列表（附最近批次）/ 新建 / 详情（含已删用例引用 `missing`）/ 改名 / 删除 |
+| POST | `/suites/{id}/copy` · PUT `/suites/{id}/cases` · POST `/suites/{id}/run` | 复制 / 存有序清单（含已删引用则 409）/ 起批次（202，复用顶栏 env/mode） |
+| POST/GET | `/runs` | 发起（202 入队）/ 台账（case_id、env_id、status、mode、batch_code、时间筛选） |
 | GET | `/runs/{id}` · `/runs/{id}/events`(SSE) · `/runs/{id}/artifacts/{path}` · `/runs/{id}/report` | 详情 / 实时事件 / 产物（白名单）/ 报告 |
 | POST | `/runs/{id}/stop` · `/runs/{id}/report` | 停止 / 重出报告 |
+| POST | `/batches` | 临时串跑（直接传有序 `case_ids`，202），等价于一次性套件 |
+| GET/POST | `/batches/{code}` · `/batches/{code}/stop` | 批次聚合进度（items + counts + done）/ 停止批次（停当前 + 未跑标记中止，终态再停 409） |
 
 错误体统一为 `{"code", "message", "detail"}`；列表分页 `?page=&size=`。
 
@@ -187,7 +198,9 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
 - **前端在 `../ui_frontend`**（Vue3 + Element Plus，dev 时 `npm run dev` 走 `/api` 代理；`frontend/dist` 一旦存在会被自动托管）；
   内核改动在源仓库 `../ui_agent` 做完后，用 `scripts/sync_kernel.py` 刷到 `kernel/`（副本勿手改）；
 - **Alembic 迁移暂缓**：本地 SQLite 直接用 `create_all`；接 MySQL 前补迁移脚本（`user.is_admin` 这类新列由
-  `db.py` 里的 `_patch_user_table()` 在启动时 `ALTER TABLE` 补齐）；
-- 场景级"整场景串跑"、运行记录导出 CSV 暂未实现（spec §8 的按钮已在用例/运行两级打通）；
+  `db.py` 里的 `_patch_user_table()` 在启动时 `ALTER TABLE` 补齐；`run.batch_code` / `run.suite_id` 由
+  `_patch_run_table()` 同法补列 + 建索引，批次聚合直接按 `Run.batch_code` 派生，无独立批次表）；
+- 运行记录导出 CSV 暂未实现（spec §8 的按钮已在用例/运行两级打通；场景级"整场景串跑"已由
+  「场景管理」套件 + 批次取代，旧入口已移除）；
 - 内核的真实模型路径（`case draft`、带决策模型的运行）要等 `.env` / `kernel/.env` 里补上 API Key 才能实跑，
   目前所有冒烟都刻意避开付费调用。

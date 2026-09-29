@@ -59,7 +59,8 @@ def create_run(body: RunIn, user: CurrentUser, db: Db) -> dict:
 
 @router.get("")
 def list_runs(user: CurrentUser, db: Db, case_id: str = "", env_id: int | None = None,
-              status: str = "", mode: str = "", date_from: str = "", date_to: str = "",
+              status: str = "", mode: str = "", batch_code: str = "",
+              date_from: str = "", date_to: str = "",
               page: int = 1, size: int = 50) -> dict:
     size = max(1, min(size, PAGE_MAX))
     query = select(Run)
@@ -71,6 +72,8 @@ def list_runs(user: CurrentUser, db: Db, case_id: str = "", env_id: int | None =
         query = query.where(Run.status.in_([item for item in status.split(",") if item]))
     if mode:
         query = query.where(Run.mode == mode)
+    if batch_code:
+        query = query.where(Run.batch_code == batch_code)
     if date_from:
         query = query.where(Run.created_at >= _parse_time(date_from))
     if date_to:

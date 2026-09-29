@@ -10,11 +10,11 @@ from pathlib import Path
 
 import httpx
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db import SessionLocal
-from app.models import AuditLog, Run, utcnow
+from app.models import AuditLog, PageInventory, Run, utcnow
 from app.services import run_service, secret_store
 
 API = "/api/v1"
@@ -236,6 +236,23 @@ def test_probe_and_page_inventory(client, auth, workspace):
     pages = expect(client.get(f"{API}/envs/{workspace['env']['id']}/pages", headers=auth),
                    200, "页清单")
     assert pages["total"] >= 1 and pages["items"][0]["url"] == "http://192.0.2.10/login", pages
+
+
+def test_env_delete_clears_page_inventory(client, auth, workspace):
+    """删环境连带清页清单（探针缓存）：带缓存的删除在 MySQL 会被外键挡住（旧逻辑 500），SQLite 下也不许留孤儿行。"""
+    env = expect(client.post(f"{API}/envs", headers=auth,
+                             json={"name": "待删环境", "label": "探针缓存清理"}), 201, "建环境")
+    expect(client.post(f"{API}/envs/{env['id']}/probe", headers=auth,
+                       json={"url": "http://192.0.2.10/login"}), 200, "探针")
+    pages = expect(client.get(f"{API}/envs/{env['id']}/pages", headers=auth), 200, "页清单")
+    assert pages["total"] >= 1, pages
+    expect(client.delete(f"{API}/envs/{env['id']}", headers=auth), 204, "删环境")
+    gone = client.get(f"{API}/envs/{env['id']}/pages", headers=auth)
+    assert gone.status_code == 404, gone.text
+    with SessionLocal() as db:
+        left = db.scalar(select(func.count()).select_from(PageInventory)
+                         .where(PageInventory.env_id == env["id"]))
+    assert left == 0, f"环境已删，但页清单还留 {left} 条"
 
 
 def test_run_missing_secret_is_rejected(client, auth, workspace):
