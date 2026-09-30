@@ -98,12 +98,80 @@ def _patch_run_table() -> None:
             conn.execute(text("CREATE INDEX ix_run_suite_id ON run (suite_id)"))
 
 
+def _patch_actor_columns() -> None:
+    """老库补列：scenario.created_by/updated_by、case.created_by（操作人展示用）。
+
+    只在补列那一次回填存量：审计日志里存的是账号，回填时解析成显示名。
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    added = False
+    with engine.begin() as conn:
+        for table, names in (("scenario", ("created_by", "updated_by")), ("case", ("created_by",))):
+            if table not in tables:
+                continue
+            quoted = engine.dialect.identifier_preparer.quote(table)  # case 是 MySQL 保留字
+            cols = {col["name"] for col in insp.get_columns(table)}
+            for name in names:
+                if name not in cols:
+                    conn.execute(text(
+                        f"ALTER TABLE {quoted} ADD COLUMN {name} VARCHAR(64) NOT NULL DEFAULT ''"))
+                    added = True
+    if added:
+        _backfill_actors()
+
+
+def _backfill_actors() -> None:
+    """从审计日志补存量行的操作人：created_by 取最早一笔，updated_by 取最近一笔。
+
+    写回走裸 SQL：ORM 的 onupdate 会把 updated_at 顶成当前时间，污染「最后修改时间」。
+    """
+    from sqlalchemy import text
+
+    from app.models import AuditLog, Case, Scenario, User
+
+    quote = engine.dialect.identifier_preparer.quote
+    updates: list[tuple[str, int, dict[str, str]]] = []
+    with session_scope() as db:
+        names = {user.account: (user.name or user.account)
+                 for user in db.scalars(select(User)).all()}
+        first: dict[tuple[str, str], str] = {}
+        last: dict[tuple[str, str], str] = {}
+        rows = db.scalars(select(AuditLog).where(AuditLog.action.in_(
+            ("scenario.create", "scenario.update", "case.create", "case.copy")))
+            .order_by(AuditLog.id)).all()
+        for row in rows:
+            who = names.get(row.user_name, row.user_name)
+            key = (row.object_type, row.object_id)
+            first.setdefault(key, who)
+            last[key] = who
+        for scenario in db.scalars(select(Scenario)).all():
+            values = {}
+            if not scenario.created_by:
+                values["created_by"] = first.get(("scenario", scenario.code), "")
+            if not scenario.updated_by:
+                values["updated_by"] = last.get(("scenario", scenario.code), "")
+            if values:
+                updates.append(("scenario", scenario.id, values))
+        for case in db.scalars(select(Case)).all():
+            if not case.created_by:
+                updates.append(("case", case.id, {"created_by": first.get(("case", case.code), "")}))
+    with engine.begin() as conn:
+        for table, row_id, values in updates:
+            sets = ", ".join(f"{name} = :{name}" for name in values)
+            conn.execute(text(f"UPDATE {quote(table)} SET {sets} WHERE id = :row_id"),
+                         {**values, "row_id": row_id})
+
+
 def init_db() -> None:
     from app.models import Run, User
 
     Base.metadata.create_all(engine)
     _patch_user_table()
     _patch_run_table()
+    _patch_actor_columns()
     with session_scope() as db:
         settings = get_settings()
         user = db.scalar(select(User).where(User.account == settings.admin_account))

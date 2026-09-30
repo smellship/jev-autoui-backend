@@ -63,9 +63,11 @@ def create_scenario(body: ScenarioIn, user: CurrentUser, db: Db) -> dict:
         raise not_found("节点", body.node_id)
     if body.env_id is not None and db.get(Env, body.env_id) is None:
         raise not_found("环境", body.env_id)
+    who = case_service.actor(user)
     scenario = Scenario(code=f"sc-{next_seq(db, 'scenario'):04d}", node_id=body.node_id,
                         name=body.name, priority=body.priority, owner=body.owner or user.name,
-                        tags=body.tags, description=body.description, env_id=body.env_id)
+                        tags=body.tags, description=body.description, env_id=body.env_id,
+                        created_by=who, updated_by=who)
     db.add(scenario)
     db.flush()
     audit.log(db, user, "scenario.create", "scenario", scenario.code, {"name": scenario.name})
@@ -99,6 +101,8 @@ def patch_scenario(scenario_id: str, body: ScenarioPatch, user: CurrentUser, db:
             setattr(scenario, field, value)
     if body.tags is not None:
         scenario.tags = body.tags
+    scenario.updated_by = case_service.actor(user)
+    scenario.updated_at = utcnow()
     audit.log(db, user, "scenario.update", "scenario", scenario.code, {"name": scenario.name})
     db.commit()
     return scenario_brief(scenario)
@@ -136,7 +140,8 @@ def create_case(scenario_id: str, body: CaseIn, user: CurrentUser, db: Db) -> di
     scenario = get_scenario(db, scenario_id)
     case = case_service.new_case(db, scenario, name=body.name, priority=body.priority,
                                  owner=body.owner or user.name, template=body.template,
-                                 copy_from=body.copy_from, env_name=_env_name(db, scenario.env_id))
+                                 copy_from=body.copy_from, env_name=_env_name(db, scenario.env_id),
+                                 user=user)
     audit.log(db, user, "case.create", "case", case.code, {"name": case.name, "scenario": scenario.code})
     db.commit()
     return case_brief(case, yaml_text=case.yaml_text)

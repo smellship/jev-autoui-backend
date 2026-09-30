@@ -525,3 +525,34 @@ def test_audit_log_written(client, auth, workspace):
                      "user.create", "user.profile", "user.password", "user.update",
                      "user.reset_password"):
         assert expected in actions, f"审计缺 {expected}：{sorted(actions)}"
+
+
+def test_creator_and_last_actor_columns(client, auth, workspace):
+    """创建人 / 最后修改或运行：新建记创建者；编辑和运行都盖「最后操作人」。"""
+    expect(client.post(f"{API}/users", headers=auth, json={
+        "account": "ut-actor", "name": "留痕同事", "password": "actor-pass-1"}), 201, "建用户")
+    mate_auth = login_token(client, "ut-actor", "actor-pass-1")
+
+    scenario = expect(client.post(f"{API}/scenarios", headers=mate_auth, json={
+        "node_id": workspace["child"]["id"], "name": "留痕场景", "priority": "P2"}), 201, "成员建场景")
+    assert scenario["created_by"] == "留痕同事" and scenario["updated_by"] == "留痕同事", scenario
+    case = expect(client.post(f"{API}/scenarios/{scenario['id']}/cases", headers=mate_auth,
+                              json={"name": "留痕用例"}), 201, "成员建用例")
+    assert case["created_by"] == "留痕同事" and case["updated_by"] == "留痕同事", case
+
+    patched = expect(client.patch(f"{API}/scenarios/{scenario['id']}", headers=auth,
+                                  json={"priority": "P1"}), 200, "管理员改场景")
+    assert patched["created_by"] == "留痕同事" and patched["updated_by"] == "管理员", patched
+
+    expect(client.put(f"{API}/cases/{case['id']}", headers=auth,
+                      json={"yaml_text": CASE_YAML, "version": 1}), 200, "管理员保存用例")
+    detail = expect(client.get(f"{API}/cases/{case['id']}", headers=auth), 200, "用例详情")
+    assert detail["created_by"] == "留痕同事" and detail["updated_by"] == "管理员", detail
+
+    run = expect(client.post(f"{API}/runs", headers=mate_auth, json={
+        "case_id": case["id"], "env_id": workspace["env"]["id"], "mode": "debug"}),
+                 202, "成员发起运行")
+    after = expect(client.get(f"{API}/cases/{case['id']}", headers=auth), 200, "运行后的用例")
+    assert after["created_by"] == "留痕同事" and after["updated_by"] == "留痕同事", \
+        "运行也算一次改动：最后操作人应回到发起运行的人"
+    wait_run(client, auth, run["id"])

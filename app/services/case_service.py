@@ -175,13 +175,15 @@ def _reidentify(yaml_text: str, code: str, name: str) -> str:
 
 
 def new_case(db: Session, scenario, name: str, priority: str | None = None, owner: str = "",
-             template: str = "blank", copy_from: str | None = None, env_name: str = "") -> Case:
+             template: str = "blank", copy_from: str | None = None, env_name: str = "",
+             user=None) -> Case:
     """在场景下新建用例，同时落下 version=1（§8.3 模板：空白 / 复制现有）。"""
     from app.db import next_seq
 
     code = f"{scenario.code}-{next_seq(db, f'case:{scenario.code}'):02d}"
     owner = owner or scenario.owner or ""
     priority = priority or scenario.priority or "P2"
+    who = actor(user) or owner  # 操作人缺席（老调用）时退回负责人，宁可有个名字也别留空
     yaml_text = skeleton(code, name, priority, owner, env_name)
     if template == "copy" and copy_from:
         source = db.scalar(select(Case).where(Case.code == copy_from, Case.deleted_at.is_(None)))
@@ -189,8 +191,8 @@ def new_case(db: Session, scenario, name: str, priority: str | None = None, owne
             raise not_found("被复制的用例", copy_from)
         yaml_text = _reidentify(source.yaml_text, code, name)
     case = Case(code=code, scenario_id=scenario.id, name=name, priority=priority, owner=owner,
-                yaml_text=yaml_text, current_version=1, updated_by=owner)
+                yaml_text=yaml_text, current_version=1, created_by=who, updated_by=who)
     db.add(case)
     db.flush()
-    db.add(CaseVersion(case_id=case.id, version=1, yaml_text=yaml_text, comment="创建", author=owner))
+    db.add(CaseVersion(case_id=case.id, version=1, yaml_text=yaml_text, comment="创建", author=who))
     return case

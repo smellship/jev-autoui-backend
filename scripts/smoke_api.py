@@ -96,6 +96,7 @@ class Smoke:
         self.client = httpx.Client(base_url=API, timeout=httpx.Timeout(10.0, read=30.0))
         self.results: list[tuple[bool, str, str]] = []
         self.token = ""
+        self.user_name = ""
         self.ids: dict[str, object] = {}
 
     # --- 基础设施 ---
@@ -178,6 +179,7 @@ def step_auth(smoke: Smoke) -> str:
     smoke.token = data["token"]
     me = expect(smoke.call("GET", "/auth/me"), 200, "当前用户")
     assert me["account"] == ACCOUNT, me
+    smoke.user_name = me.get("name") or me["account"]
     return f"token 已签发（{data['expires_in']}s），401 与错误口令都被拒绝"
 
 
@@ -246,9 +248,11 @@ def step_scenario(smoke: Smoke) -> str:
         "node_id": smoke.ids["node"], "name": "手工查验", "priority": "P1", "tags": ["冒烟"],
     }), 201, "建场景")
     smoke.ids["scenario"] = scenario["id"]
+    assert scenario["created_by"] and scenario["updated_by"], scenario
     listed = expect(smoke.call("GET", f"/scenarios?node_id={smoke.ids['node']}"), 200, "场景列表")
     assert listed["total"] == 1 and listed["items"][0]["id"] == scenario["id"], listed
-    return f"环境 {env['name']}（地址未配置）· 场景 {scenario['id']} P1"
+    assert listed["items"][0]["created_by"] == scenario["created_by"], listed
+    return f"环境 {env['name']}（地址未配置）· 场景 {scenario['id']} P1（创建人 {scenario['created_by']}）"
 
 
 def step_case(smoke: Smoke) -> str:
@@ -256,9 +260,10 @@ def step_case(smoke: Smoke) -> str:
                              json={"name": "83票"}), 201, "建用例")
     smoke.ids["case"] = case["id"]
     assert case["version"] == 1 and case["yaml_text"].startswith("id:"), case
+    assert case["created_by"] and case["updated_by"] == case["created_by"], case
     detail = expect(smoke.call("GET", f"/cases/{case['id']}"), 200, "用例详情")
     assert detail["scenario_code"] == smoke.ids["scenario"], detail
-    return f"{case['id']} v1（骨架 YAML，{len(case['yaml_text'])} 字符）"
+    return f"{case['id']} v1（骨架 YAML，{len(case['yaml_text'])} 字符，创建人 {case['created_by']}）"
 
 
 def step_validate_bad(smoke: Smoke) -> str:
@@ -380,8 +385,10 @@ def step_run_debug(smoke: Smoke) -> str:
     kinds = {item["kind"] for item in data["artifacts"]}
     assert {"screenshot", "trace", "report", "summary"} <= kinds, sorted(kinds)
     assert data["report_exists"] and len(data["checks"]) == 6, data["checks"]
+    after = expect(smoke.call("GET", f"/cases/{smoke.ids['case']}"), 200, "运行后的用例")
+    assert after["updated_by"] == smoke.user_name, f"运行没盖「最后操作人」：{after}"
     return (f"{run['id']} → passed，{data['steps']} 步 / {len(data['checks'])} 条断言 / "
-            f"{len(data['artifacts'])} 个产物 / {data['duration_ms']}ms")
+            f"{len(data['artifacts'])} 个产物 / {data['duration_ms']}ms；最后操作人 {after['updated_by']}")
 
 
 def step_sse(smoke: Smoke) -> str:

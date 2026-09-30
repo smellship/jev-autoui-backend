@@ -155,6 +155,9 @@ def create_run(db: Session, case: Case, env: Env, mode: str, user) -> Run:
         artifact_dir=str(get_settings().runs_dir / code), triggered_by=actor(user),
     )
     db.add(run)
+    # 运行也算一次改动：用例卡片上的「最后修改或运行」要跟着运行走
+    case.updated_by = actor(user)
+    case.updated_at = utcnow()
     db.flush()
     audit.log(db, user, "run.create", "run", run.code,
               {"case": case.code, "env": env.name, "mode": mode})
@@ -220,6 +223,8 @@ def create_batch(db: Session, cases: list[Case], env: Env, mode: str, user,
         db.add(run)
         db.flush()
         runs.append(run)
+        case.updated_by = actor(user)  # 同 create_run：运行刷新「最后操作人」
+        case.updated_at = utcnow()
     audit.log(db, user, "batch.create", "batch", batch_code,
               {"total": len(runs), "env": env.name, "mode": mode,
                "suite": suite.code if suite else "", "cases": [case.code for case, _ in prepared]})

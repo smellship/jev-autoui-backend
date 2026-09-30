@@ -82,6 +82,8 @@ def scenario_brief(scenario: Scenario, case_count: int = 0, last_run: Run | None
         "priority": scenario.priority, "owner": scenario.owner, "tags": scenario.tags or [],
         "description": scenario.description, "env_id": scenario.env_id,
         "case_count": case_count, "last_run": run_brief(last_run) if last_run else None,
+        "created_by": scenario.created_by, "updated_by": scenario.updated_by,
+        "updated_at": iso(scenario.updated_at),
     }
 
 
@@ -89,7 +91,8 @@ def case_brief(case: Case, last_run: Run | None = None, yaml_text: str | None = 
     data = {
         "id": case.code, "scenario_id": case.scenario_id, "name": case.name,
         "priority": case.priority, "tags": case.tags or [], "owner": case.owner,
-        "version": case.current_version, "updated_by": case.updated_by,
+        "version": case.current_version,
+        "created_by": case.created_by, "updated_by": case.updated_by,
         "updated_at": iso(case.updated_at),
         "last_run": run_brief(last_run) if last_run else None,
     }

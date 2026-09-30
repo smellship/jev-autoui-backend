@@ -59,6 +59,8 @@ class Scenario(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     env_id: Mapped[int | None] = mapped_column(ForeignKey("env.id"), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(64), default="")
+    updated_by: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -74,6 +76,7 @@ class Case(Base):
     owner: Mapped[str] = mapped_column(String(64), default="")
     yaml_text: Mapped[str] = mapped_column(Text, default="")
     current_version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str] = mapped_column(String(64), default="")
     updated_by: Mapped[str] = mapped_column(String(64), default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -166,7 +166,8 @@ def copy_case(case_id: str, user: CurrentUser, db: Db, body: CaseCopy | None = N
             raise not_found("目标场景", body.scenario_id)
     name = (body.name if body and body.name else "") or f"{case.name} 副本"
     new_case = case_service.new_case(db, scenario, name=name, priority=case.priority,
-                                     owner=case.owner, template="copy", copy_from=case.code)
+                                     owner=case.owner, template="copy", copy_from=case.code,
+                                     user=user)
     audit.log(db, user, "case.copy", "case", new_case.code, {"from": case.code})
     db.commit()
     return case_brief(new_case, yaml_text=new_case.yaml_text)
