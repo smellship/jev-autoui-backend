@@ -179,3 +179,10 @@ class UserPatch(BaseModel):
 
 class PasswordResetIn(BaseModel):
     password: str
+
+
+class ModelKeysIn(BaseModel):
+    """模型 Key：None=不改，空串=清除（值只写不读）。"""
+
+    text_model_api_key: str | None = Field(default=None, max_length=512)
+    typesafe_api_key: str | None = Field(default=None, max_length=512)

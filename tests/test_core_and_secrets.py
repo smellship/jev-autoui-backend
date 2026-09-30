@@ -10,7 +10,15 @@ from app.core.config import get_settings
 from app.core.errors import ApiError
 from app.core.paths import safe_join
 from app.core.security import create_token, decode_token, hash_password, verify_password
+from app.main import _safe_db_url
 from app.services import secret_store
+
+
+def test_safe_db_url_masks_credentials():
+    assert _safe_db_url("mysql+pymysql://root:sec%40ret@127.0.0.1:3306/ui_web?charset=utf8mb4") == \
+        "mysql+pymysql://root:***@127.0.0.1:3306/ui_web?charset=utf8mb4"
+    assert _safe_db_url("sqlite:///./ui_web.db") == "sqlite:///./ui_web.db"
+    assert _safe_db_url("mysql+pymysql://root@127.0.0.1/db") == "mysql+pymysql://root@127.0.0.1/db"
 
 
 def test_password_roundtrip():

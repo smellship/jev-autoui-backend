@@ -23,6 +23,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("ui_web")
 
 
+def _safe_db_url(url: str) -> str:
+    """日志里的库地址不带口令：mysql+pymysql://root:***@host/db。"""
+    scheme, sep, rest = url.partition("://")
+    if not sep or "@" not in rest:
+        return url
+    creds, _, tail = rest.partition("@")
+    user, colon, _ = creds.partition(":")
+    return f"{scheme}://{user}:***@{tail}" if colon else url
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
 
@@ -33,7 +43,7 @@ def create_app() -> FastAPI:
         run_service.queue.start()
         retention.start_background()
         log.info("平台已就绪：db=%s artifacts=%s kernel=%s",
-                 settings.db_url, settings.artifacts_dir, settings.kernel_cmd)
+                 _safe_db_url(settings.db_url), settings.artifacts_dir, settings.kernel_cmd)
         try:
             yield
         finally:

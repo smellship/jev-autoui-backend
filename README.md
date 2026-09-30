@@ -45,8 +45,13 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8770   # ⑥ 起服务
 
 - Windows 下 ④ 写成 `$env:PLAYWRIGHT_BROWSERS_PATH="$PWD/kernel/.browsers"; uv run python -m playwright install chromium`；
   Linux 首次装系统依赖可加 `--with-deps`（要 root）。装了全局 `PLAYWRIGHT_BROWSERS_PATH` 的话，要和 `kernel/.browsers` 一致。
+- 装不动（内网/离线）：从已装好的机器把整个 `.browsers/` 拷到 `kernel/.browsers` 即可（版本号目录名要一致，如 `chromium-1243`）；
+  报 `Executable doesn't exist at …kernel\.browsers\…` 就是这一步没做，或 playwright 升级后版本号对不上。
+- 服务器没有桌面：起服务前设 `UI_AGENT_HEADLESS=true`（随内核子进程透传），`--mode debug` 也只留截图不弹窗；
+  无桌面的 Linux 上不设它，有头浏览器起不来。
 - 内核的浏览器/产物目录按"包所在工程根"推导，副本放进 `kernel/` 后 `.browsers/`、`.artifacts/` 自动落在
-  `ui_backend/kernel/` 下，整体自洽，不需要改内核代码。
+  `ui_backend/kernel/` 下，整体自洽，不需要改内核代码。`.browsers/` 与 `kernel/.env` 都在 gitignore，
+  `sync_kernel.py` 同步时也不动它们。
 - 部署前同步内核（开发在源仓库 `../ui_agent` 进行）：
 
 ```bash
@@ -68,8 +73,9 @@ UI_WEB_TEST_DB_URL="mysql+pymysql://root:<本地口令>@127.0.0.1:3306/ui_web_te
 SMOKE_DB_URL="mysql+pymysql://root:<本地口令>@127.0.0.1:3306/ui_web_smoke?charset=utf8mb4" uv run python scripts/smoke_api.py
 ```
 
-冒烟覆盖主流程 23 项：健康检查 / 登录鉴权 / 用户管理（自助改密 + 管理员围墙）/ 分类树 /
-环境与密钥（只写不读）/ 探针与页清单 / 用例校验（错误码+行号）/ 保存与乐观锁 409 / TestPlan 预览 /
+冒烟覆盖主流程 24 项：健康检查 / 登录鉴权 / 用户管理（自助改密 + 管理员围墙）/ 分类树 /
+环境与密钥（只写不读）/ 模型 API Key（只写不读 + 注入内核子进程）/ 探针与页清单 /
+用例校验（错误码+行号）/ 保存与乐观锁 409 / TestPlan 预览 /
 自然语言草稿 / 运行（debug·ci·失败·停止）/ SSE 实时事件 / 产物与报告（含路径穿越）/ 运行台账筛选 /
 版本回滚 / 软删除 / 场景管理（套件 + 批次串跑，失败继续）/ 批次停止（aborted / 再停 409）/
 审计落库 + 全目录密钥明文扫描。
@@ -148,6 +154,7 @@ app/
 ├─ services/
 │   ├─ kernel_client.py    内核子进程：argv 数组、JSON 解析、日志落盘、进程树终止
 │   ├─ secret_store.py     secrets/<env>.local.yaml（只写不读、${{secret.X}}/${{env.X}} 解析）
+│   ├─ model_keys.py       模型 API Key：secrets/_model_keys.local.yaml（只写不读、注入内核子进程）
 │   ├─ case_service.py     YAML ↔ TestPlan：校验 / 保存版本 / 回滚 / 草稿
 │   ├─ suite_service.py    串跑套件（场景管理）：CRUD / 有序清单 / 引用校验 / 存清单
 │   ├─ run_service.py      串行队列 + 状态映射 + 页清单登记 + 停止 / 重出报告 + 批次（同 batch_code 按序入队 / 停止批次）
@@ -155,10 +162,10 @@ app/
 │   └─ audit.py            审计
 ├─ importers/
 │   └─ midscene.py         老脚本（midscene）→ 用例 YAML：前瞻断言 / vars / 报告（离线）
-└─ api/v1/                 auth · nodes · scenarios · cases · suites · batches · envs · runs（含 SSE）
+└─ api/v1/                 auth · nodes · scenarios · cases · suites · batches · envs · runs（含 SSE）· users · settings
 kernel/                    内核副本（源仓库 ui_agent 的单向同步，见 KERNEL_SOURCE.md）
 scripts/                   sync_kernel.py（同步内核）· fake_kernel.py（内核桩）· init_db.py · import_midscene.py（脚本导入）· smoke_api.py · smoke_kernel_real.py
-tests/                     conftest（临时库+桩）· kernel_client · core/secrets · case_service · midscene 导入 · api_flow · retention
+tests/                     conftest（临时库+桩）· kernel_client · core/secrets · case_service · midscene 导入 · api_flow · model_keys · suite/batch · retention
 ```
 
 ## 主要接口
@@ -168,6 +175,7 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
 | POST | `/auth/login` · GET `/auth/me` | 登录换 token / 当前用户 |
 | PATCH | `/auth/me` · PUT `/auth/password` | 改自己的昵称 / 改自己的密码（要核对原密码，401 `bad_password`） |
 | GET/POST | `/users` · PATCH `/users/{id}` · POST `/users/{id}/password` | 用户管理（**仅管理员**，否则 403）：列表 / 新建 / 改名·停用·设管理员（不能动自己，409 `self_guard`）/ 重置密码 |
+| GET/PUT | `/settings/model-keys` | 模型 API Key（**仅管理员**，否则 403）：状态（键名+已设置+来源） / 写入（`None`=不改、空串=清除；值只写不读，落 `secrets/_model_keys.local.yaml`） |
 | GET/POST | `/nodes` · PATCH/DELETE `/nodes/{id}` | 分类树 |
 | GET/POST | `/scenarios` · GET/PATCH/DELETE `/scenarios/{id}` | 场景 |
 | GET/POST | `/scenarios/{id}/cases` | 场景下用例列表 / 新建 |
@@ -189,6 +197,11 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
 ## 安全边界（与内核一致）
 
 - 密钥只存 `secrets/<env>.local.yaml`（gitignore、写时 chmod 600）；接口**只写不读**，响应只回键名与"已设置"；
+- 模型 API Key（`TEXT_MODEL_API_KEY` / `TYPESAFE_API_KEY`）同一不变式：只存 `secrets/_model_keys.local.yaml`，
+  设置页只写不读；每次起内核子进程时注入环境变量（存储值优先于服务器进程 env，内核 pydantic-settings 直接读），
+  即改即生效、不用重启；
+- 启动日志里的库地址带脱敏（`mysql+pymysql://user:***@host/db`）；冒烟的明文扫描除了用例/环境密钥、模型 Key，
+  还会把外部库口令一起盯上；
 - 真值只在运行前解析成内核 `--var` 参数，**不进模型、不进产物、不进日志**（冒烟会全目录扫描明文）；
 - 模型输出永不变成 selector / 坐标 / 可执行 JS；产物访问一律经规范化前缀校验（路径穿越 400）；
 - YAML 用 `safe_load`；按钮 = 固定命令 + 白名单参数，无"执行任意命令"接口。
@@ -202,5 +215,6 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
   `_patch_run_table()` 同法补列 + 建索引，批次聚合直接按 `Run.batch_code` 派生，无独立批次表）；
 - 运行记录导出 CSV 暂未实现（spec §8 的按钮已在用例/运行两级打通；场景级"整场景串跑"已由
   「场景管理」套件 + 批次取代，旧入口已移除）；
-- 内核的真实模型路径（`case draft`、带决策模型的运行）要等 `.env` / `kernel/.env` 里补上 API Key 才能实跑，
-  目前所有冒烟都刻意避开付费调用。
+- 内核的真实模型路径（`case draft`、带决策模型的运行）要有 API Key 才能实跑：管理员在设置页
+  「模型 API Key」里填两把 Key 即可（写入后对之后的内核调用生效）；或者沿用内核自己的 `.env` / `kernel/.env`。
+  平台冒烟仍刻意避开付费调用。

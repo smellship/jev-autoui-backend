@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from app.core.config import get_settings
+from app.services import model_keys
 
 
 class KernelError(Exception):
@@ -31,6 +32,8 @@ def child_env() -> dict:
     # 内核 print 到管道时默认用 locale 编码（中文 Windows = GBK），强制 UTF-8
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    # 设置页存的模型 Key 覆盖进程 env（存储值优先；内核 pydantic-settings 直接读环境变量）
+    env.update(model_keys.env_overrides())
     return env
 
 

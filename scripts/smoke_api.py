@@ -3,7 +3,8 @@
 - 数据默认落 .smoke/（SMOKE_DB_URL 可切外部库，如本地 MySQL，开跑前清空重建），
   可反复跑；不联网、不调模型、不起浏览器；
 - 覆盖：登录鉴权 / 用户管理（自助改密 + 管理员围墙）/ 分类树 / 场景 / 用例 / 校验 /
-  保存与乐观锁 / TestPlan 预览 / 自然语言草稿 / 环境与密钥（只写不读）/ 探针与页清单 /
+  保存与乐观锁 / TestPlan 预览 / 自然语言草稿 / 环境与密钥（只写不读）/ 模型 API Key
+  （只写不读 + 注入内核子进程）/ 探针与页清单 /
   运行（debug·ci·失败·停止）/ SSE 实时事件 / 产物与报告（含路径穿越）/ 版本回滚 /
   场景管理（套件 + 批次串跑：失败继续 / 进度聚合 / 批次停止）/ 复制与软删除 / 明文泄漏扫描。
 
@@ -23,6 +24,7 @@ from pathlib import Path
 
 import httpx
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 ROOT = Path(__file__).resolve().parent.parent
 SMOKE = ROOT / ".smoke"
@@ -42,6 +44,8 @@ API = f"{BASE}/api/v1"
 ACCOUNT, PASSWORD = "admin", "admin123"
 SECRET_ACCOUNT = "smoke-account-9527"
 SECRET_PASSWORD = "smoke-password-8531"
+MODEL_TEXT_KEY = "smoke-text-model-key-7421"
+MODEL_JEV_KEY = "smoke-typesafe-key-3164"
 
 CASE_YAML = """id: sc-0001-01
 title: 83票
@@ -311,12 +315,58 @@ def step_secrets(smoke: Smoke) -> str:
     return "密钥已写入 secrets/，响应只回键名与 已设置✓"
 
 
+def step_model_keys(smoke: Smoke) -> str:
+    """模型 API Key（管理员）：只写不读、成员 403、真注入内核子进程、清除再写回。"""
+    items = expect(smoke.call("GET", "/settings/model-keys"), 200, "Key 状态")["items"]
+    assert [item["key"] for item in items] == ["text_model_api_key", "typesafe_api_key"], items
+    assert not any(item["set"] for item in items), f"新库不该有已设置的 Key：{items}"
+
+    mate = expect(smoke.call("POST", "/auth/login", json={
+        "account": "smoke-mate", "password": "mate-pass-3"}), 200, "同事登录")["token"]
+    mate_header = {"Authorization": f"Bearer {mate}"}
+    expect(smoke.client.get("/settings/model-keys", headers=mate_header), 403, "非管理员看 Key")
+    expect(smoke.client.put("/settings/model-keys", headers=mate_header,
+                            json={"text_model_api_key": "x"}), 403, "非管理员写 Key")
+
+    data = expect(smoke.call("PUT", "/settings/model-keys", json={
+        "text_model_api_key": MODEL_TEXT_KEY, "typesafe_api_key": MODEL_JEV_KEY,
+    }), 200, "写 Key")
+    text = json.dumps(data, ensure_ascii=False)
+    assert MODEL_TEXT_KEY not in text and MODEL_JEV_KEY not in text, "响应里出现了 Key 明文"
+    keys = {item["key"]: item for item in data["items"]}
+    assert all(item["set"] and item["source"] == "file" for item in keys.values()), keys
+    store = SMOKE / "secrets" / "_model_keys.local.yaml"
+    assert store.exists(), "Key 应落到 secrets/_model_keys.local.yaml"
+    blob = store.read_text(encoding="utf-8")
+    assert MODEL_TEXT_KEY in blob and MODEL_JEV_KEY in blob, "文件里应有两把明文"
+
+    # 真跑一次：桩在 kernel.log 里报「收到没收到」，验证注入真的到了子进程
+    run = expect(smoke.call("POST", "/runs", json={
+        "case_id": smoke.ids["case"], "env_id": smoke.ids["env"], "mode": "debug"}), 202, "带 Key 运行")
+    detail = wait_run(smoke, run["id"])
+    assert detail["status"] == "passed", detail
+    log = smoke.call("GET", f"/runs/{run['id']}/artifacts/kernel.log")
+    assert log.status_code == 200, f"kernel.log 取不到：{log.status_code}"
+    assert "[stub] model-keys text=set jev=set" in log.text, log.text[-400:]
+
+    # 清除一把 → 状态翻转、文件里不再有；再写回，让末尾的明文扫描盯着两把都有效
+    cleared = expect(smoke.call("PUT", "/settings/model-keys",
+                                json={"text_model_api_key": ""}), 200, "清除文本模型 Key")
+    assert cleared["changed"] == ["text_model_api_key"], cleared
+    assert MODEL_TEXT_KEY not in store.read_text(encoding="utf-8"), "清除后文件里不该留明文"
+    expect(smoke.call("PUT", "/settings/model-keys",
+                      json={"text_model_api_key": MODEL_TEXT_KEY}), 200, "写回文本模型 Key")
+    return (f"两把 Key 只写不读（成员 403）；运行 {run['id']} 的 kernel.log 报 text=set jev=set；"
+            f"清除→写回也验证")
+
+
 def step_probe(smoke: Smoke) -> str:
     data = expect(smoke.call("POST", f"/envs/{smoke.ids['env']}/probe",
                              json={"url": "http://192.0.2.10/login"}), 200, "探针")
     assert data["needs_login"] is True and data["has_password_field"] is True, data
     pages = expect(smoke.call("GET", f"/envs/{smoke.ids['env']}/pages"), 200, "页清单")
-    assert pages["total"] >= 1 and pages["items"][0]["needs_login"] is True, pages
+    row = next((item for item in pages["items"] if item["url"].endswith("/login")), None)
+    assert row and row["needs_login"] is True, pages  # 按 URL 找行：运行也会往清单里记页
     return f"标题「{data['title']}」元素 {data['element_count']} 个 · 页清单 {pages['total']} 条"
 
 
@@ -497,8 +547,11 @@ def step_audit_and_leak(smoke: Smoke) -> str:
                      "env.secrets", "env.probe", "run.create", "run.stop",
                      "user.create", "user.profile", "user.password", "user.update",
                      "user.reset_password", "suite.create", "suite.set_cases",
-                     "batch.create", "batch.stop"):
+                     "batch.create", "batch.stop", "settings.model_keys"):
         assert expected in actions, f"审计缺 {expected}：{sorted(set(actions))}"
+    needles = [SECRET_ACCOUNT, SECRET_PASSWORD, MODEL_TEXT_KEY, MODEL_JEV_KEY]
+    if not DB_URL.startswith("sqlite") and make_url(DB_URL).password:
+        needles.append(make_url(DB_URL).password)  # 库口令也不许落 .smoke/ 任何文件（启动日志已脱敏）
     leaked = []
     for path in SMOKE.rglob("*"):
         if not path.is_file() or (SMOKE / "secrets") in path.parents:
@@ -507,12 +560,12 @@ def step_audit_and_leak(smoke: Smoke) -> str:
             blob = path.read_bytes()
         except OSError:
             continue
-        for secret in (SECRET_ACCOUNT.encode(), SECRET_PASSWORD.encode()):
-            if secret in blob:
+        for secret in needles:
+            if secret.encode() in blob:
                 leaked.append(path.name)
     assert not leaked, f"这些文件里出现了密钥明文：{sorted(set(leaked))}"
     return (f"审计 {len(actions)} 条（{len(set(actions))} 种动作）；"
-            f"secrets/ 之外（db / 产物 / 日志）均无密钥明文")
+            f"secrets/ 之外（db / 产物 / 日志）均无密钥明文（含 {len(needles)} 类值）")
 
 
 def reset_db() -> None:
@@ -545,6 +598,8 @@ def start_server() -> subprocess.Popen:
         "FAKE_KERNEL_STEP_MS": "150",
     })
     env.pop("UI_WEB_ADMIN_PASSWORD", None)
+    env.pop("TEXT_MODEL_API_KEY", None)  # 模型 Key 由设置页写入，冒烟要可控（别被开发机 env 干扰）
+    env.pop("TYPESAFE_API_KEY", None)
     log = (SMOKE / "server.log").open("wb")
     kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     return subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
@@ -600,6 +655,7 @@ def main() -> int:
         smoke.step("TestPlan 预览 + 自然语言草稿", lambda: step_preview_and_draft(smoke))
         smoke.step("地址未配置时拒绝运行", lambda: step_run_blocked(smoke))
         smoke.step("写密钥（只写不读）+ 环境可用", lambda: step_secrets(smoke))
+        smoke.step("模型 API Key（只写不读 + 内核注入）", lambda: step_model_keys(smoke))
         smoke.step("探针 + 页清单", lambda: step_probe(smoke))
         smoke.step("运行(debug) 跑完 5 步", lambda: step_run_debug(smoke))
         smoke.step("SSE 实时事件", lambda: step_sse(smoke))

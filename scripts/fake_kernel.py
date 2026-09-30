@@ -217,6 +217,10 @@ PNG_1PX = bytes.fromhex(
 
 def cmd_run(args) -> int:
     plan = json.loads(Path(args.plan_file).read_text(encoding="utf-8"))
+    # 平台注入的模型 Key 有没有到子进程（只报有无、不打值），供冒烟核对注入链路
+    print("[stub] model-keys text=%s jev=%s" % (
+        "set" if os.environ.get("TEXT_MODEL_API_KEY") else "empty",
+        "set" if os.environ.get("TYPESAFE_API_KEY") else "empty"), flush=True)
     run_dir = Path(args.run_dir)
     (run_dir / "screenshots").mkdir(parents=True, exist_ok=True)
     (run_dir / "snapshots").mkdir(parents=True, exist_ok=True)
