@@ -39,8 +39,9 @@
 - 密钥只放 `.env`（已 gitignore）；测试不得调用付费 API（含 TypeSafe 与文本模型）。
 - 平台契约（P0）：平台只按 **argv 调 CLI + 读文件/JSON**，永不 import 内核代码。
   带 `--json` 的子命令 stdout 只留最后一份 JSON（人类话术走 stderr），退出码 0=成功、1=用例失败（JSON 仍有效）、其他=内核错误。
-  `case compile` 出错时 `plan` 必须为 `null`；`run --run-dir` 的产物布局（根 `trace.jsonl` 每行有 `step/url/title`、
-  根 `actions.json`、`snapshots/`、`screenshots/`、`summary.json`/`plan.json`）是对外接口，改名即破坏平台。
+  `case compile` 出错时 `plan` 必须为 `null`；`run --run-dir` 的产物布局（根 `trace.jsonl` 是分层时间线：
+  `run_start`/`run_end`/`step_start`/`step_end` 生命周期行 + `decision`（每行有 `step/url/title`）+ `assert` + `model` 行，
+  并带 `seq` 与毫秒级 `at`；根 `actions.json`、`snapshots/`、`screenshots/`、`summary.json`/`plan.json`）是对外接口，改名即破坏平台。
   产物策略由 `UI_AGENT_MODE` 定，有无头由 `UI_AGENT_HEADLESS` 定（服务器 `--mode debug` 也要无头）。
 - 中文 Windows 下一律 UTF-8 读写（`encoding="utf-8"`），否则 GBK 解码会崩。
 - 未经用户要求不 commit / push。
@@ -55,4 +56,5 @@ uv run python scripts/smoke_plan.py              # 两步计划的真实浏览�
 uv run python scripts/smoke_supervisor.py        # 监督升级的真实浏览器冒烟（脚本化监督，零模型调用）
 uv run python scripts/smoke_upload.py            # 上传 A/C 两条通道 + 页面拒收负例（零模型调用）
 uv run python scripts/smoke_m3.py                # iframe / shadow / 遮挡 / 新标签 / 对话框（本地 HTTP 服务，零模型调用）
+uv run python scripts/smoke_assert.py            # 断言：计数 / 属性 / 轮询重试 + 计数负例（零模型调用）
 ```

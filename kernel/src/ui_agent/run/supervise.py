@@ -15,7 +15,7 @@ from ui_agent.schema.supervisor import Ruling
 
 KINDS = ("hint", "recover", "replan", "abort")
 UNAVAILABLE_DETAILS = {
-    "off": "未启用监督模型（--no-supervisor）",
+    "off": "未启用监督模型（大模型总闸关闭：--supervisor off / UI_AGENT_SUPERVISOR=false）",
     "no_key": "缺少 TEXT_MODEL_API_KEY；监督模型不可用",
 }
 

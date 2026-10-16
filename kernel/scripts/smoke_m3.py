@@ -63,7 +63,7 @@ class ScriptedEngine:
         self.script = list(script)
         self.calls: list[str] = []
 
-    def decide(self, state: State, goal: str, rules=None) -> Decision:
+    def decide(self, state: State, goal: str, rules=None, error_context=None) -> Decision:
         if not self.script:
             raise AssertionError(f"『{goal}』的脚本用完了（第 {len(self.calls) + 1} 次决策）")
         operation, label = self.script.pop(0)
@@ -90,7 +90,7 @@ def serve(directory: Path) -> tuple[str, socketserver.TCPServer]:
 
 def run_case(tag: str, goal: str, script, checks: list[str], base: str, ui_mode: str,
              vars: dict | None = None, **over):
-    settings = Settings(ui_agent_mode=ui_mode, ui_agent_supervisor=False, **over)
+    settings = Settings(ui_agent_mode=ui_mode, ui_agent_supervisor=False, ui_agent_cache=False, **over)
     driver = Driver(settings)
     runner = Runner(settings, goal, f"{base}/m3_fixture.html",
                     checks=[parse_check(c) for c in checks], task=f"m3-{tag}",
@@ -101,8 +101,10 @@ def run_case(tag: str, goal: str, script, checks: list[str], base: str, ui_mode:
 
 
 def read_trace(run_dir: Path) -> list[dict]:
+    """只留决策行：本脚本都按决策行的下标取证；生命周期行不是动作。"""
     text = (run_dir / "trace.jsonl").read_text(encoding="utf-8").strip()
-    return [json.loads(line) for line in text.splitlines()] if text else []
+    rows = [json.loads(line) for line in text.splitlines()] if text else []
+    return [row for row in rows if row.get("kind", "decision") == "decision"]
 
 
 def read_json(path: Path) -> dict:

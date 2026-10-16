@@ -101,7 +101,8 @@ def main() -> int:
               json.dumps(plan.get("vars"), ensure_ascii=False))
         check("断言编译成 kind/value/expected",
               plan["steps"][1]["checks"][0] == {"kind": "element_value", "value": "行政区域",
-                                                "expected": "2102 大连", "role": ""},
+                                                "expected": "2102 大连", "role": "",
+                                                "attr": "", "timeout_ms": 0},
               json.dumps(plan["steps"][1]["checks"], ensure_ascii=False))
 
         print("\n[2] 编译结果原样喂给 run --plan-file")
@@ -137,7 +138,8 @@ def main() -> int:
 
         print("\n[5] run --json（目标不可达：也要给出合法 JSON 与产物）")
         code, out, err = run_cli(["run", "--plan-file", str(plan_file), "--run-dir", str(run_dir),
-                                  "--mode", mode, "--url", "http://127.0.0.1:9/", "--json"])
+                                  "--mode", mode, "--url", "http://127.0.0.1:9/", "--json",
+                                  "--cache", "off"])
         data = load_json(out, "run")
         check("退出码 1（用例没成功）", code == 1, f"code={code}")
         check("JSON 里 ok=false、status=error", data.get("ok") is False and data.get("status") == "error",

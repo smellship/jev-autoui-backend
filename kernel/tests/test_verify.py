@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from ui_agent.schema.state import Element, PageInfo, State
-from ui_agent.verify.asserts import check, find_elements, parse_check, run_checks
+from ui_agent.verify.asserts import check, find_elements, parse_check, run_checks, run_checks_polling
 
 
 def state() -> State:
@@ -63,3 +63,125 @@ class TestChecks:
         assert [el.index for el in find_elements(state(), "区域")] == [2]
         assert [el.index for el in find_elements(state(), "submit order")] == [4]
         assert find_elements(state(), "查询", role="textbox") == []
+
+
+def with_text(text: str) -> State:
+    st = state()
+    st.page.text = text
+    return st
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def advance(clock: FakeClock, seconds: float) -> None:
+    clock.now += seconds
+
+
+class TestCountAndAttribute:
+    def test_count_pass_and_fail(self):
+        spec = parse_check("element_count=查询|1")
+        assert (spec.value, spec.expected) == ("查询", "1")
+        assert check(state(), spec).ok
+        failed = check(state(), parse_check("element_count=查询|2"))
+        assert not failed.ok and "实际匹配 1 个" in failed.evidence
+
+    def test_count_without_label_means_no_label_filter(self):
+        spec = parse_check("element_count=4")
+        assert (spec.value, spec.expected) == ("", "4")
+        assert check(state(), spec).ok
+        assert not check(state(), parse_check("element_count=3")).ok
+
+    def test_count_rejects_non_integer(self):
+        with pytest.raises(ValueError, match="整数"):
+            parse_check("element_count=查询|很多")
+
+    def test_count_evidence_marks_truncated_snapshot(self):
+        st = state()
+        st.omitted = 2  # 快照有元素被截掉，计数断言要标出这一点
+        ok = check(st, parse_check("element_count=4"))
+        assert ok.ok and "截断" in ok.evidence
+        assert "截断" in check(st, parse_check("element_count=9")).evidence
+
+    def test_attribute_requires_attr_and_works_with_dom(self):
+        with pytest.raises(ValueError, match="attr"):
+            parse_check('{"kind":"element_attribute","value":"下载","expected":"/x"}')
+        st = state()
+        st.elements.append(Element(index=5, role="link", label="下载使用手册"))
+
+        class Dom:
+            def __init__(self, values: dict):
+                self.values = values
+
+            def get_attribute(self, index: int, name: str) -> str:
+                return self.values.get((index, name), "")
+
+        spec = parse_check('{"kind":"element_attribute","value":"下载使用手册",'
+                           ' "attr":"href", "expected":"/help/manual.pdf"}')
+        assert check(st, spec, Dom({(5, "href"): "/help/manual.pdf"})).ok
+        assert not check(st, spec, Dom({(5, "href"): "/other.pdf"})).ok
+        assert not check(st, spec, Dom({})).ok
+        missing, evidence = check(st, spec, None), check(st, spec, None).evidence
+        assert not missing.ok and "不支持" in evidence
+
+    def test_attribute_reports_missing_element(self):
+        class Dom:
+            def get_attribute(self, index: int, name: str) -> str:
+                return ""
+
+        result = check(state(), parse_check('{"kind":"element_attribute","value":"不存在",'
+                                            ' "attr":"href", "expected":"/x"}'), Dom())
+        assert not result.ok and "没有匹配元素" in result.evidence
+
+
+class TestPolling:
+    def test_succeeds_after_retries_and_reports_attempt(self):
+        clock = FakeClock()
+        outcome = run_checks_polling(
+            [parse_check("text_contains=查询完成")], with_text("加载中"),
+            lambda: with_text("查询完成"), timeout_ms=5000,
+            interval_ms=250, clock=clock, sleep=lambda s: advance(clock, s))
+        assert outcome.ok and outcome.attempts == 2
+        assert outcome.checks[0].attempts == 2 and outcome.elapsed_ms == 250
+
+    def test_timeout_reports_total_rounds(self):
+        clock = FakeClock()
+        outcome = run_checks_polling(
+            [parse_check("text_contains=永远不会出现")], with_text("加载中"),
+            lambda: with_text("加载中"), timeout_ms=1000,
+            interval_ms=250, clock=clock, sleep=lambda s: advance(clock, s))
+        assert not outcome.ok and outcome.attempts == 5 and outcome.elapsed_ms == 1000
+        assert outcome.checks[0].attempts == 5
+
+    def test_per_check_timeout_widens_the_window(self):
+        clock = FakeClock()
+        spec = parse_check('{"kind":"text_contains","value":"X","timeout_ms":1000}')
+        outcome = run_checks_polling([spec], with_text("加载中"), lambda: with_text("加载中"),
+                                     timeout_ms=0, interval_ms=250, clock=clock,
+                                     sleep=lambda s: advance(clock, s))
+        assert not outcome.ok and outcome.elapsed_ms == 1000  # 运行级窗口为 0，单条自己加宽到 1s
+
+    def test_zero_window_evaluates_once(self):
+        calls = {"n": 0}
+
+        def state_fn() -> State:
+            calls["n"] += 1
+            return with_text("加载中")
+
+        outcome = run_checks_polling([parse_check("text_contains=不出现")], with_text("加载中"),
+                                     state_fn, timeout_ms=0)
+        assert outcome.attempts == 1 and calls["n"] == 0
+
+    def test_passed_checks_stop_being_reevaluated(self):
+        clock = FakeClock()
+        outcome = run_checks_polling(
+            [parse_check("text_contains=已经就绪"), parse_check("text_contains=后来就绪")],
+            with_text("已经就绪"), lambda: with_text("已经就绪，后来就绪"),
+            timeout_ms=1000, interval_ms=250, clock=clock, sleep=lambda s: advance(clock, s))
+        assert outcome.ok and outcome.attempts == 2
+        assert [item.attempts for item in outcome.checks] == [1, 2]

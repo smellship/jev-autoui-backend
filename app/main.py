@@ -39,7 +39,6 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         init_db()
-        run_service.queue.concurrency = max(1, settings.run_concurrency)
         run_service.queue.start()
         retention.start_background()
         log.info("平台已就绪：db=%s artifacts=%s kernel=%s",
@@ -68,8 +67,7 @@ def create_app() -> FastAPI:
             "time": datetime.now().isoformat(timespec="seconds"),
             "db": db_state,
             "kernel": settings.kernel_cmd,
-            "queue": {"pending": run_service.queue.pending(),
-                      "concurrency": run_service.queue.concurrency},
+            "queue": run_service.queue.snapshot(),
             "artifacts_dir": str(settings.artifacts_dir),
             "retention_enabled": settings.retention_enabled,
         }

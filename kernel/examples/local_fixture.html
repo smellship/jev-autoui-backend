@@ -61,6 +61,19 @@
   <div class="spacer"></div>
   <button id="below" type="button">下方按钮</button>
 
+  <section id="assert-demo">
+    <h3>断言演示（计数 / 属性 / 异步）</h3>
+    <div id="rows">
+      <button class="row" type="button">模拟行 1</button>
+      <button class="row" type="button">模拟行 2</button>
+      <button class="row" type="button">模拟行 3</button>
+    </div>
+    <p><a id="manual" href="/help/manual.pdf">下载使用手册</a></p>
+    <p><button id="async" type="button">异步查询</button>
+       <span id="async-status">异步结果未就绪</span></p>
+    <p><button id="async-wipe" type="button">清空全部</button></p>
+  </section>
+
   <section id="upload">
     <h3>发票上传（本地夹具，限制与线上页一致）</h3>
     <label for="folder">选择票夹</label>
@@ -99,6 +112,17 @@
   byId('adv').addEventListener('click', () => { byId('status').textContent = '进入高级查询'; });
   byId('covered').addEventListener('click', () => { byId('status').textContent = '遮挡按钮被点到'; });
   byId('below').addEventListener('click', () => { byId('status').textContent = '下方按钮已点击'; });
+
+  // --- 断言演示：计数（模拟行）、属性（href）、异步（延迟就绪，供断言轮询） ---
+  // 延迟必须明显大于点击后的 settle（700ms），否则首评时结果已就绪，轮询路径根本走不到
+  byId('async').addEventListener('click', () => {
+    byId('async-status').textContent = '异步查询中…';
+    setTimeout(() => { byId('async-status').textContent = '异步结果已就绪'; }, 2500);
+  });
+  byId('async-wipe').addEventListener('click', () => {
+    byId('rows').innerHTML = '';
+    byId('async-status').textContent = '异步结果未就绪';
+  });
 
   // --- 上传夹具：线上页的规则原样搬过来（格式 / 单文件大小 / 数量），负例在这一层拒绝 ---
   const ALLOWED = ['pdf', 'jpg', 'jpeg', 'png'];

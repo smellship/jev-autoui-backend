@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, batches, cases, envs, nodes, runs, scenarios, settings, suites, users
+from app.api.v1 import auth, batches, cases, envs, nodes, profiles, runs, scenarios, settings, suites, users
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(auth.router)
@@ -13,5 +13,6 @@ router.include_router(runs.router)
 router.include_router(batches.router)
 router.include_router(users.router)
 router.include_router(settings.router)
+router.include_router(profiles.router)
 
 __all__ = ["router"]

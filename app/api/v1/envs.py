@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, Db
 from app.api.serializers import iso
 from app.core.errors import ApiError, not_found
-from app.models import Env, PageInventory, Run, Scenario, utcnow
+from app.models import Env, PageInventory, Run, Scenario, iso_utc, utcnow
 from app.schemas import EnvIn, EnvPatch, ProbeIn, SecretsIn
 from app.services import audit, kernel_client, secret_store
 from app.services.kernel_client import KernelError
@@ -161,7 +161,7 @@ def probe(env_id: int, user: CurrentUser, db: Db, body: ProbeIn | None = None) -
         "element_count": summary.get("element_count") or 0,
         "needs_login": summary.get("needs_login"),
         "has_password_field": summary.get("has_password_field"),
-        "at": utcnow().isoformat(timespec="seconds"),
+        "at": iso_utc(utcnow()),
     }
     upsert_page(db, env, result["final_url"], result["title"], result["needs_login"])
     extra = dict(env.extra or {})

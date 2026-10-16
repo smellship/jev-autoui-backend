@@ -33,6 +33,14 @@ class TestReasoningOptions:
         assert reasoning_options("https://api.deepseek.com/v1", "low") == {}
 
 
+def test_json_mode_prompts_contain_the_word_json():
+    """json_object 模式要求消息里出现 "json" 一词，否则网关 400；各缝 prompt 都必须带上。"""
+    from ui_agent.decide import prompts
+
+    for name in ("DELEGATE", "THINKING_DELEGATE", "PLANNER", "SUPERVISOR", "TEXT_VALUE"):
+        assert "json" in getattr(prompts, name).lower(), name
+
+
 class TestChatJson:
     def test_requires_key(self):
         with pytest.raises(RuntimeError, match="TEXT_MODEL_API_KEY"):
@@ -43,6 +51,40 @@ class TestChatJson:
         data, meta = chat_json(settings(), "sys", {"goal": "登录"})
         assert data == {"text": "sysadmin"}
         assert meta["model"] == "deepseek-chat" and meta["reasoning"] == "none"
+
+    def test_repairs_extra_closing_brace(self, monkeypatch):
+        """模型偶尔多生成一个 }，修复后应能正常解析。"""
+        monkeypatch.setattr(client_mod, "post_json", lambda *a, **k: reply('{"answers": {"op": "CLICK"}}}'))
+        data, meta = chat_json(settings(), "sys", {"goal": "点击"})
+        assert data == {"answers": {"op": "CLICK"}}
+
+    def test_repairs_multiple_extra_braces(self, monkeypatch):
+        """多个多余括号也能修。"""
+        monkeypatch.setattr(client_mod, "post_json", lambda *a, **k: reply('{"x": 1}}}'))
+        data, meta = chat_json(settings(), "sys", {"goal": "测试"})
+        assert data == {"x": 1}
+
+    def test_repairs_truncated_string_tail(self, monkeypatch):
+        """尾部被截断（字符串没收尾、括号没闭合）——真实监督模型出过的形态，补全后应能解析。"""
+        content = ('{"ruling": "RECOVER", "action": {"operation": "SCROLL_TO", "element": 79}, '
+                   '"reason": "元素79不可见，需先滚动到它才可点击。')
+        monkeypatch.setattr(client_mod, "post_json", lambda *a, **k: reply(content))
+        data, meta = chat_json(settings(), "sys", {"a": 1})
+        assert data["ruling"] == "RECOVER" and data["action"]["element"] == 79
+        assert data["reason"].endswith("可点击。")
+
+    def test_closes_truncated_lists_and_objects(self):
+        assert client_mod._try_repair_json('[{"goal": "打开登录页"}, {"goal": "输账号') == \
+            [{"goal": "打开登录页"}, {"goal": "输账号"}]
+        assert client_mod._try_repair_json('{"a": "b"') == {"a": "b"}
+        assert client_mod._try_repair_json('{"a": 1,}') is None  # 尾部逗号不是截断形态
+
+    def test_truncated_mid_number_is_not_repaired(self, monkeypatch):
+        """截断点落在数字中间（7 可能是 79 被切）——拒绝修，宁可报错也不猜值。"""
+        assert client_mod._try_repair_json('{"element": 79') is None
+        monkeypatch.setattr(client_mod, "post_json", lambda *a, **k: reply('{"element": 79'))
+        with pytest.raises(RuntimeError, match="未返回 JSON"):
+            chat_json(settings(), "sys", {"a": 1})
 
     def test_drops_reasoning_field_when_gateway_rejects_it(self, monkeypatch):
         bodies: list[dict] = []
@@ -107,6 +149,16 @@ class TestTextFill:
         value, meta = resolve_text(settings(), "登录", state().elements[0], state(),
                                    vars={"验证码": "1234"})
         assert value == "from-model" and meta["source"] == "text_model"
+
+    def test_unusable_payload_names_the_unmatched_vars(self, monkeypatch):
+        """键名对不上控件标签时，报错要能把「哪个键、哪个标签」摆出来。"""
+        monkeypatch.setattr("ui_agent.llm.textfill.chat_json", lambda *a, **k: ({"text": None}, {}))
+        element = Element(index=3, role="textbox", label="请输入帐户名", operations=["CLICK", "TYPE_TEXT"])
+        page_state = State(page=PageInfo(url="http://x/", title="T", text="登录"), elements=[element])
+        with pytest.raises(RuntimeError, match="未给出可用的字段值") as excinfo:
+            resolve_text(settings(), "登录", element, page_state, vars={"账号": "u", "密码": "p"})
+        message = str(excinfo.value)
+        assert "账号" in message and "请输入帐户名" in message
 
     @pytest.mark.parametrize("payload", [{"text": None}, {"text": ""}, {"text": "x" * 2001}, {"text": 5},
                                          {"text": "ok", "extra": 1}])

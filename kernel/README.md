@@ -41,8 +41,15 @@ uv run python scripts\smoke_upload.py --files a.png b.pdf   # 指定上传文件
 uv run python scripts\smoke_m3.py
 uv run python scripts\smoke_m3.py --headed --only tab   # 只看"新标签跟随"那一段
 
+# 离线断言冒烟：计数 / 属性 / 轮询重试（含一条计数负例，本地 HTTP 服务，零模型调用）
+uv run python scripts\smoke_assert.py
+uv run python scripts\smoke_assert.py --headed --only poll   # 只看"轮询重试"那一段
+
 # 离线契约冒烟：case compile / snapshot --json / run --json / report --json 的子进程级验证（零模型调用）
 uv run python scripts\smoke_cli.py
+
+# 离线回放冒烟：录制 → 零模型回放（真 CLI --decider off，全命中免模型）→ 失配停机（零模型调用）
+uv run python scripts\smoke_replay.py
 ```
 
 ## 跑一个目标
@@ -68,8 +75,15 @@ uv run ui-agent run --goal-file examples\goals\baiwang_full.txt --url <网址> -
 示例目标文件里**不含任何真实凭据**：账号、密码、上传文件路径一律在运行时用 `--var` 注入
 （值不落盘、不进任何模型调用），所以这些文件可以安全地进版本库。
 
-断言写法：`kind=值`、`element_value=标签|期望值`，或直接给 JSON。可用 kind：
-`text_contains / url_contains / title_contains / element_exists / element_absent / element_value`。
+断言写法：`kind=值`、`element_value=标签|期望值`、`element_count=标签|个数`（或只给个数），
+或直接给 JSON（可带 `attr` / `timeout_ms`）。可用 kind：
+`text_contains / url_contains / title_contains / element_exists / element_absent / element_value /
+element_count / element_attribute`。
+
+`element_count` 数「标签包含该值的元素个数」；`element_attribute` 读元素属性
+（`{"kind": "element_attribute", "value": 标签, "attr": "href", "expected": "..."}`）。
+DONE 后的验收**自动轮询**：默认窗口 `UI_AGENT_ASSERT_TIMEOUT_MS`（5000ms），单条可用
+`timeout_ms` 加宽；页面慢半拍不再白跑一次模型往返，trace 的 `assert` 行记第几轮才成立。
 
 ## 跑一条计划（M1）
 
@@ -111,11 +125,31 @@ RECOVER 的动作走和 Jev 决策完全相同的执行路径（守卫、降级�
 
 预算：`SUPERVISOR_PER_STEP`（默认 2，每步重置）与 `SUPERVISOR_PER_RUN`（默认 6，整轮共享），
 在调用前扣除，所以升级次数有限、循环必然终止。监督模型不可用（没 key、预算用完、回答不合规）
-时行为与 M0 完全一致：直接停机。`--no-supervisor` 或 `UI_AGENT_SUPERVISOR=false` 可以关掉这个缝。
+时行为与 M0 完全一致：按 M0 语义收尾。`--supervisor off` 或 `UI_AGENT_SUPERVISOR=false` 关掉大模型总闸：
+升级点直接停（断言未过不再给第二次 DONE 机会），TYPE_TEXT 字段值也只认 `--var`。
+决策层另有 `--decider`（或 `UI_AGENT_DECIDER`）：`jev`=Jev 决策（默认）、`llm`=大模型代班 Jev（快路径不开思考）、
+`off`=关闭决策（只认回放缓存，没有可回放的记录就按 `cache_missed` 停）。
 
 计划模式下 REPLAN 会把**剩余步骤整体换成新序列**（原计划留在 `plan.json`，新计划写 `plan.final.json`，
 重试的那一步另开 `-r2` 目录，`summary.json` 里有 `replans` 记录）；单目标模式下 REPLAN 只会停在
 `replanned` 状态并提示改用计划模式——不会假装成功。
+
+## 回放缓存（零模型回归）
+
+同一条用例在同一环境跑过后，决策与收尾结论会按「用例哈希 + 环境地址」建键录下来：下次整步命中就回放，
+**零模型调用**；命中不了才交还模型。录像按起点上下文（URL 路径 + 标题）分成变体：回放自动挑与当前
+页面相符的那条（后录优先），选不中整步交还；同一用例的不同初始状态（如登录页 / 已登录页）各录一条变体。
+回放不是另走一套：元素按语义重定位（role+label 精确 → 唯一标签兜底），页面上下文守卫不符即交还；
+回放出的收尾结论仍要过独立断言。回放出的记录没能成立（动作执行失败 / 断言没过）时，本步剩余录像
+整体作废交还模型（后面的记录都建立在前面成立的前提上）；整步走完且结论成立才把新录像并入对应变体
+（自愈回填 + 防投毒：失败只淘汰回放过的那条变体，且失败那步绝不落盘）。
+
+开关：`--cache off`（`UI_AGENT_CACHE=false`）本次运行不碰缓存；`--cache-strict`
+（`UI_AGENT_CACHE_STRICT=true`）严判——命中的记录还须状态签名一致，页面悄悄变了也能看出来。
+配合 `--decider off` 与 `--supervisor off` 整轮零模型：全命中直接过，失配即 `cache_missed` 停机，
+并报出原因（no-entry / no-variant / wrong-context / invalid-entry / truncated / retry）。`trace.jsonl` 多一行
+运行级 `kind="cache"` 事实：模式（self-finalized / agent-concluded / missed）、写入结果
+（saved / kept / no-change / unconfirmed / evicted / not-written）、命中/失配与逐类步骤计数。
 
 ## 上传文件（拖拽 / 点选）
 
@@ -192,30 +226,39 @@ uv run ui-agent report --run-dir .artifacts\runs\case-123 --json   # → {ok, re
 
 ## 产物
 
-单目标运行在 `.artifacts/runs/<任务>-<时间>/` 留下：`result.json`、`trace.jsonl`（每步决策与降级级别）、
-`actions.json`（动作 + 是否改变页面）、`snapshots/*.json`（喂给模型的 state）、`screenshots/`、`report.html`。
+单目标运行在 `.artifacts/runs/<任务>-<时间>/` 留下：`result.json`、`trace.jsonl`、`actions.json`
+（动作 + 是否改变页面）、`snapshots/*.json`（喂给模型的 state）、`screenshots/`、`report.html`。
+
+`trace.jsonl` 是一份**分层时间线**：每行有 `seq`（文件内连续编号，行序即事件序）与 `at`（毫秒），
+按 `kind` 分四层——`run_start`/`run_end`（运行边界：身份、配置、最终状态与耗时）、
+`step_start`/`step_end`（计划模式的步边界，只在根 trace 有）、`decision`（一次决策往返 + 落地的动作，
+保留秒级 `time` 兼容老消费方）、`assert`（DONE 验收：轮询次数 `attempts`、耗时、逐条结果）、
+`model`（没产出决策的模型调用，比如响应不合规）。回放缓存另有一行运行级 `kind="cache"`：
+模式、写入结果、命中/失配与逐类步骤计数（词表见 `run/trace.py` 头部注释）。
 
 计划的运行目录多出：`plan.json`、`summary.json`（逐步结果 + `replans`）、`steps/<NN-目标>/`（每步自成一套产物）、
-根 `trace.jsonl`（各步 trace 的**聚合**，每行补记 `plan_step`）、根 `actions.json`（同理，带 `plan_step`）、
-`report.html`（汇总报告，截图按相对路径引用）；发生重排时还有 `plan.final.json`。
+根 `trace.jsonl`（各步的**聚合**：决策/断言/模型行原样汇入并补记 `plan_step`，生命周期行留在各自文件）、
+根 `actions.json`（同理，带 `plan_step`）、`report.html`（汇总报告，截图按相对路径引用）；发生重排时还有 `plan.final.json`。
 
-平台的回读口径就锚在这套布局上：`summary.json` 给状态与逐步结果，根 `trace.jsonl` 给逐决策时间线（含 `url`/`title`），
-根 `actions.json` 给动作序列。截图只进报告、永不进模型输入；`mode=debug` 逐步留图，`mode=ci` 只留失败那一张。
+平台的回读口径就锚在这套布局上：`summary.json` 给状态与逐步结果，根 `trace.jsonl` 给逐决策时间线
+（决策行含 `url`/`title`），根 `actions.json` 给动作序列。截图只进报告、永不进模型输入；
+`mode=debug` 逐步留图，`mode=ci` 只留失败那一张。
 `mode` 与有无头已经解绑（`UI_AGENT_HEADLESS` 单独控制），服务器上 `--mode debug` 也不会弹窗。
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| `src/ui_agent/cli.py` | 命令行：`case` / `plan` / `run` / `snapshot` / `report`（`--no-supervisor`、`--upload-mode`、`--dialog-policy` 可覆盖配置） |
+| `src/ui_agent/cli.py` | 命令行：`case` / `plan` / `run` / `snapshot` / `report`（`--decider`、`--supervisor`、`--cache`、`--cache-strict`、`--upload-mode`、`--dialog-policy` 可覆盖配置） |
 | `src/ui_agent/case/` | 用例 YAML：按行号校验 → 编译成计划；计划 → 用例 YAML 草稿 |
 | `src/ui_agent/llm/` | 三个 LLM 缝：planner 编排、textfill 字段取值、supervisor 卡住裁决 |
 | `src/ui_agent/observe/` | state 组装；`js/snapshot.js` 页面内取数与索引标记；`js/guard.js` 执行前守卫 |
 | `src/ui_agent/decide/` | Jev 客户端、questions 模板、提示词 |
 | `src/ui_agent/driver/` | Playwright 驱动：双模式启动、点击降级阶梯、跨 frame 快照、新标签跟随、原生对话框事实 |
 | `src/ui_agent/act/` | 白名单动作执行 + 守卫预检 + 降级通报；上传取值校验（`upload.py`） |
-| `src/ui_agent/verify/` | 独立断言（文本/URL/元素/控件值），不看模型自述 |
-| `src/ui_agent/run/` | 单目标主循环与多步计划执行、卡住检测、监督升级、预算、产物落盘 |
+| `src/ui_agent/verify/` | 独立断言（文本/URL/元素/控件值/计数/属性 + DONE 后轮询验收），不看模型自述 |
+| `src/ui_agent/run/` | 单目标主循环与多步计划执行、卡住检测、监督升级、预算、分层时间线（`trace.py`）与产物落盘 |
+| `src/ui_agent/replay/` | 回放缓存：键与单键文件（`cache.py`）、语义重定位与上下文守卫（`match.py`）、录制/回放会话（`session.py`） |
 | `src/ui_agent/schema/` | 契约：state / decision / check / plan / supervisor / status |
 | `src/ui_agent/report/` | HTML 报告（计划模式读 `summary.json`，单目标读 `result.json`） |
 | `tests/fakes.py` | 离线单测的假驱动、假决策引擎与脚本化监督模型（不起浏览器、不调模型） |
@@ -238,8 +281,10 @@ M3 完成（本地夹具验证）：**上传**（A/C 两条通道 + 页面级验
 的真实 Chromium 上跑通，但**尚未在真实业务页面上实跑校准**——拿到合适的页面后再验证一遍（尤其是遮挡判定与跨域帧）。
 M4（批量回归）未开始。P0（平台契约）已完成：`case compile/draft`、`run --run-dir/--json`、`snapshot --json`、
 `report --json` 与产物布局（根聚合 `trace.jsonl`/`actions.json`、`screenshots/`），命令行契约有子进程级冒烟 `scripts/smoke_cli.py` 把守。
+回放缓存（plan.md 第 4 项）内核侧已落地：按「用例哈希 + 环境地址」建键的录制 / 回放（语义重定位、上下文守卫、
+失配交还与自愈回填）、独立严判开关、零模型停机语义，`scripts/smoke_replay.py` 在真实 Chromium 上把守。
 
-离线单测 222 项与六个冒烟脚本（`smoke_cli` / `smoke_snapshot` / `smoke_plan` / `smoke_supervisor` / `smoke_upload` / `smoke_m3`）全绿。
+离线单测 317 项与八个冒烟脚本（`smoke_cli` / `smoke_snapshot` / `smoke_plan` / `smoke_supervisor` / `smoke_upload` / `smoke_m3` / `smoke_assert` / `smoke_replay`）全绿。
 
 实跑校准（2026-09-23，百望非税查询页）：`goto` 之后**不能立刻信快照**——页面 `domcontentloaded`
 后先渲染壳（约 20 个导航元素），内容区 0.8–3 秒后才到，中间那段窗口"看起来稳定"却没有任何

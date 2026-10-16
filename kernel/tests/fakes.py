@@ -30,6 +30,7 @@ class FakeDriver:
         self.uploads: list[tuple[int, list[str], str]] = []
         self.notes: list[str] = []
         self.dialogs: list[dict] = []
+        self.attributes: dict[tuple[int, str], str] = {}
 
     def take_notes(self) -> list[str]:
         notes, self.notes = self.notes, []
@@ -105,6 +106,10 @@ class FakeDriver:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_bytes(b"\x89PNG\r\n\x1a\n")
 
+    def get_attribute(self, index: int, name: str) -> str:
+        """断言用的只读属性读取口；没登记的属性返回空串。"""
+        return self.attributes.get((index, name), "")
+
 
 class FakeEngine:
     def __init__(self, decisions: list[Decision], error: Exception | None = None):
@@ -114,7 +119,7 @@ class FakeEngine:
         self.goals: list[str] = []
         self.rules: list[list[str] | None] = []
 
-    def decide(self, state, goal, rules=None) -> Decision:
+    def decide(self, state, goal, rules=None, error_context=None) -> Decision:
         self.seen_states.append(state)
         self.goals.append(goal)
         self.rules.append(rules)
@@ -158,18 +163,23 @@ def settings_for(tmp_path, **overrides) -> Settings:
         def profile_dir(self):
             return tmp_path / "profile"
 
-    base = {"ui_agent_mode": "ci", "max_actions": 3, "max_decisions": 8}
+        @property
+        def cache_dir(self):
+            return tmp_path / "cache"
+
+    base = {"ui_agent_mode": "ci", "max_actions": 3, "max_decisions": 8, "ui_agent_cache": False}
     return Local(**{**base, **overrides})
 
 
-def snapshot(fingerprint: str, text: str = "", labels: list[str] | None = None) -> dict:
+def snapshot(fingerprint: str, text: str = "", labels: list[str] | None = None,
+             url: str = "http://x/", title: str = "T") -> dict:
     labels = ["查询"] if labels is None else labels
     elements = [
         {"index": i + 1, "role": "button", "label": label, "rect": [0, 0, 10, 10],
          "in_viewport": True, "occluded_by": "", "disabled": False, "operations": ["CLICK"]}
         for i, label in enumerate(labels)
     ]
-    return {"page": {"url": "http://x/", "title": "T", "text": text, "viewport": {}, "scroll": {}},
+    return {"page": {"url": url, "title": title, "text": text, "viewport": {}, "scroll": {}},
             "elements": elements, "fingerprint": fingerprint, "omitted": 0}
 
 
@@ -186,5 +196,10 @@ def blocked(confidence: float = 0.9) -> Decision:
 
 
 def read_trace(run_dir) -> list[dict]:
+    """只留决策行：断言都按决策行的下标写的；要读全量时间线用 read_rows。"""
+    return [row for row in read_rows(run_dir) if row.get("kind", "decision") == "decision"]
+
+
+def read_rows(run_dir) -> list[dict]:
     text = (run_dir / "trace.jsonl").read_text(encoding="utf-8").strip()
     return [json.loads(line) for line in text.splitlines()] if text else []

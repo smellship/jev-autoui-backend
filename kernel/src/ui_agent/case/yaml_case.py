@@ -21,7 +21,9 @@ from ui_agent.schema.plan import PlanStep, TestPlan
 
 MAX_STEPS = 12                  # 与 planner 同一个上限：步骤太多既跑不动也读不懂
 MAX_CHECKS_PER_STEP = 3
-RESULT_KINDS = ("text_contains", "element_value", "element_absent")  # 能证明业务结果的断言
+# 能证明业务结果的断言（text 类看内容，count/attribute 看条目数与属性事实）
+RESULT_KINDS = ("text_contains", "element_value", "element_absent",
+                "element_count", "element_attribute")
 BAD_NAME_CHARS = '/\\:*?"<>|'
 SENSITIVE_KEY_WORDS = ("密码", "口令", "password", "passwd", "secret", "token", "凭据")
 REF_RE = re.compile(r"\$\{\{\s*(secret|env)\.([^}]*)\}\}")
@@ -170,7 +172,7 @@ def _steps(raw: Any, doc: _Doc, err, warn) -> list[PlanStep]:
         checks = _checks(raw_step.get("checks"), index, line, doc, err, warn)
         if checks and index == len(raw) - 1 and not any(item.kind in RESULT_KINDS for item in checks):
             warn(line, "weak_final_check",
-                 "最后一步没有能证明业务结果的断言（建议 text_contains / element_value）："
+                 "最后一步没有能证明业务结果的断言（建议 text_contains / element_value / element_count）："
                  "只证明控件还在，结果对不对没验证")
         built.append(PlanStep(goal=goal or "（缺少 goal）", checks=checks,
                               url=_text(raw_step.get("url")), note=_text(raw_step.get("note"))))
@@ -196,8 +198,18 @@ def _checks(raw: Any, index: int, line: int, doc: _Doc, err, warn) -> list[Check
 def _check_spec(raw: Any, line: int, err) -> CheckSpec | None:
     if isinstance(raw, dict) and raw:
         if "kind" in raw:
-            spec = CheckSpec(kind=_text(raw.get("kind")), value=_text(raw.get("value")),
-                             expected=_text(raw.get("expected")), role=_text(raw.get("role")))
+            try:
+                timeout_ms = int(_text(raw.get("timeout_ms")) or 0)
+            except ValueError:
+                err(line, "bad_check", f"timeout_ms 必须是整数毫秒：{_text(raw.get('timeout_ms'))}")
+                return None
+            try:
+                spec = CheckSpec(kind=_text(raw.get("kind")), value=_text(raw.get("value")),
+                                 expected=_text(raw.get("expected")), role=_text(raw.get("role")),
+                                 attr=_text(raw.get("attr")), timeout_ms=timeout_ms)
+            except ValidationError as exc:
+                err(line, "bad_check", _flat("；".join(item["msg"] for item in exc.errors())))
+                return None
         elif len(raw) == 1:
             kind, value = next(iter(raw.items()))
             target, _, expected = _plain(value).partition("|")
@@ -211,17 +223,38 @@ def _check_spec(raw: Any, line: int, err) -> CheckSpec | None:
     if spec.kind not in KINDS:
         err(line, "bad_kind", f"未知断言类型 {spec.kind or '（空）'}；可用：{'、'.join(KINDS)}")
         return None
-    if not spec.value:
-        spec.value = spec.expected
+    if spec.kind == "element_count":
+        # 「标签|个数」或只给「个数」；元素标签留空 = 不限定标签
+        if not spec.expected:
+            if spec.value.isdigit():
+                spec.value, spec.expected = "", spec.value
+            else:
+                spec.expected = spec.value
+        if not spec.expected.isdigit():
+            err(line, "bad_check", f"element_count 的期望值必须是整数个数：{spec.expected or '（空）'}")
+            return None
+    else:
+        if not spec.value:
+            spec.value = spec.expected
+        if not spec.expected:
+            spec.expected = spec.value
+    if not spec.value and spec.kind != "element_count":
+        err(line, "empty_check", f"断言 {spec.kind} 没有给值")
+        return None
     if not spec.expected:
-        spec.expected = spec.value
-    if not spec.value:
         err(line, "empty_check", f"断言 {spec.kind} 没有给值")
         return None
     return spec
 
 
-def _check_yaml(spec: CheckSpec) -> dict[str, str]:
+def _check_yaml(spec: CheckSpec) -> dict:
+    if spec.attr or spec.timeout_ms:
+        out: dict[str, Any] = {"kind": spec.kind, "value": spec.value, "expected": spec.expected}
+        if spec.attr:
+            out["attr"] = spec.attr
+        if spec.timeout_ms:
+            out["timeout_ms"] = spec.timeout_ms
+        return out
     value, expected = spec.value or spec.expected, spec.expected or spec.value
     return {spec.kind: expected if value == expected else f"{value}|{expected}"}
 

@@ -19,9 +19,12 @@ from ui_agent.decide.jev import to_jev_state
 from ui_agent.driver.playwright_ import Driver
 from ui_agent.llm.planner import make_plan, plan_from_json, plan_to_json
 from ui_agent.observe.snapshot import build_state, page_summary
+from ui_agent.replay.cache import goal_case_hash
+from ui_agent.replay.session import open_session
 from ui_agent.report.html import build_report
 from ui_agent.run.plan_runner import PlanResult, PlanRunner
 from ui_agent.run.runner import Runner, RunResult
+from ui_agent.run.trace import append_row, cache_row
 from ui_agent.verify.asserts import parse_check
 
 MAX_GOAL_CHARS = 8000
@@ -56,8 +59,14 @@ def apply_overrides(settings: Settings, args) -> Settings:
         overrides["max_actions"] = args.max_actions
     if getattr(args, "conf_min", None):
         overrides["ui_agent_conf_min"] = args.conf_min
-    if getattr(args, "no_supervisor", False):
-        overrides["ui_agent_supervisor"] = False
+    if getattr(args, "decider", None):
+        overrides["ui_agent_decider"] = args.decider
+    if getattr(args, "supervisor", None):
+        overrides["ui_agent_supervisor"] = args.supervisor == "on"
+    if getattr(args, "cache", None):
+        overrides["ui_agent_cache"] = args.cache == "on"
+    if getattr(args, "cache_strict", False):
+        overrides["ui_agent_cache_strict"] = True
     if getattr(args, "upload_mode", None):
         overrides["ui_agent_upload_mode"] = args.upload_mode
     if getattr(args, "dialog_policy", None):
@@ -165,9 +174,16 @@ def cmd_run(args) -> int:
 
 def _run_goal(args, settings: Settings) -> int:
     checks = [parse_check(item) for item in args.check]
-    runner = Runner(settings, load_goal(args), args.url, checks=checks, task=args.task,
-                    vars=parse_vars(args.var), run_dir=_run_dir(args), json_mode=args.json)
+    goal = load_goal(args)
+    variables = parse_vars(args.var)
+    session = open_session(settings, case_hash=goal_case_hash(goal, checks), base_url=args.url,
+                           plan_name=args.task)
+    runner = Runner(settings, goal, args.url, checks=checks, task=args.task,
+                    vars=variables, run_dir=_run_dir(args), json_mode=args.json, cache=session)
     result = runner.run()
+    if session is not None:
+        session.run_id = result.run_dir.name
+        append_row(result.run_dir / "trace.jsonl", cache_row(session.finalize()))
     if args.json:
         _print_json(_goal_payload(result))
         return 0 if result.success else 1
@@ -281,7 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     goal.add_argument("--plan-file", help="plan.json（由 ui-agent plan 生成；此时不需要 --goal）")
     run.add_argument("--url", help="起始地址；目标模式必填，计划模式可覆盖计划里的入口")
     run.add_argument("--check", action="append", default=[],
-                     help="验收断言，可重复。写法：kind=值，或 element_value=标签|期望值，或 JSON")
+                     help="验收断言，可重复。写法：kind=值、element_value=标签|期望值、"
+                          "element_count=标签|个数（或只给个数），或 JSON（可带 attr / timeout_ms）")
     run.add_argument("--task", default="task", help="任务名（目标模式用于产物目录）")
     run.add_argument("--var", action="append", default=[], metavar="键=值",
                      help="字段值或上传文件路径（键名要出现在控件标签里，多文件用 ; 分隔）；"
@@ -294,8 +311,14 @@ def main(argv: list[str] | None = None) -> int:
                           "accept=点确定；出现 confirm/prompt 一律记缺陷候选")
     run.add_argument("--max-actions", type=int, help="覆盖 MAX_ACTIONS")
     run.add_argument("--conf-min", type=float, help="覆盖 UI_AGENT_CONF_MIN")
-    run.add_argument("--no-supervisor", action="store_true",
-                     help="卡住时不咨询监督模型，直接按 M0 语义停机")
+    run.add_argument("--decider", choices=["jev", "llm", "off"],
+                     help="决策层：jev=Jev 决策模型（默认）；llm=大模型代班 Jev；off=关闭决策（只回放缓存）")
+    run.add_argument("--supervisor", choices=["on", "off"], metavar="on|off",
+                     help="大模型总闸：on=监督+字段取值（默认）；off=全部关闭（升级点直接停、字段只认 --var）")
+    run.add_argument("--cache", choices=["on", "off"],
+                     help="回放缓存：on=命中免模型 + 断言确认后录制（默认）；off=本次运行不读写缓存")
+    run.add_argument("--cache-strict", action="store_true",
+                     help="严判：命中的记录必须状态签名一致，否则视为失配交还模型")
     run.add_argument("--run-dir", help="指定产物目录（默认 .artifacts/runs/<任务>-<时间戳>）")
     run.add_argument("--json", action="store_true",
                      help="stdout 只输出一份 JSON（人类话术走 stderr），供平台回读")

@@ -29,6 +29,14 @@ def match_var(vars: dict[str, str] | None, label: str) -> tuple[str, str] | None
     return key, value
 
 
+def _unmatched_vars_hint(vars: dict[str, str] | None, label: str) -> str:
+    """没被用上的 --var 是这类失败的头号嫌疑：把键名和控件标签摆在一起给人看。"""
+    keys = [str(key) for key in (vars or {}) if str(key).strip()]
+    if not keys:
+        return ""
+    return f"控件标签「{label}」不含任何现有 --var 键（{'、'.join(keys)}）——键名需为控件标签的子串"
+
+
 def resolve_text(settings: Settings, goal: str, element: Element, state: State,
                  vars: dict[str, str] | None = None) -> tuple[str, dict]:
     """vars 是人给的测试数据，不进任何模型请求；没有匹配才回落到文本模型。"""
@@ -37,8 +45,13 @@ def resolve_text(settings: Settings, goal: str, element: Element, state: State,
         key, value = hit
         return value, {"source": "var", "key": key, "model": "-", "latency_ms": 0}
 
+    hint = _unmatched_vars_hint(vars, element.label)
+    suffix = f"；{hint}" if hint else ""
+    if not settings.ui_agent_supervisor:
+        raise RuntimeError(
+            f"大模型总闸已关（UI_AGENT_SUPERVISOR=false）：没有匹配 --var 的字段值{suffix}；未执行任何输入。")
     data, meta = chat_json(settings, TEXT_VALUE, field_context(goal, element, state))
     value = data.get("text")
     if set(data) != {"text"} or not isinstance(value, str) or not value.strip() or len(value) > 2000:
-        raise RuntimeError("文本模型未给出可用的字段值（可能缺少依据）；未执行任何输入。")
+        raise RuntimeError(f"文本模型未给出可用的字段值（可能缺少依据）{suffix}；未执行任何输入。")
     return value, {"source": "text_model", **meta}

@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, Db
 from app.api.serializers import case_brief, case_list_items, iso, last_run_by_case
 from app.core.config import get_settings
-from app.core.errors import not_found
+from app.core.errors import ApiError, not_found
 from app.models import Case, CaseVersion, Node, Scenario, utcnow
-from app.schemas import CaseCopy, CaseDraft, CaseImport, CaseRollback, CaseSave, CaseValidate
+from app.schemas import CaseCopy, CaseDraft, CaseImport, CasePatch, CaseRollback, CaseSave, CaseValidate
 from app.services import audit, case_service
 
 router = APIRouter(prefix="/cases", tags=["cases"])
@@ -92,6 +92,26 @@ def save_case(case_id: str, body: CaseSave, user: CurrentUser, db: Db) -> dict:
     case = get_case(db, case_id)
     result = case_service.save(db, case, body.yaml_text, body.version, user, body.comment)
     return {"id": case.code, "name": case.name, **result}
+
+
+MUTEX_LEVELS = ("none", "env", "account")
+
+
+@router.patch("/{case_id}")
+def patch_case(case_id: str, body: CasePatch, user: CurrentUser, db: Db) -> dict:
+    """用例元信息修改：目前只有互斥挡（none | env | account）。"""
+    case = get_case(db, case_id)
+    if body.mutex is None:
+        raise ApiError(422, "nothing_to_patch", "没有要修改的字段", {})
+    if body.mutex not in MUTEX_LEVELS:
+        raise ApiError(422, "bad_mutex", f"互斥挡只能是 {'/'.join(MUTEX_LEVELS)}", {"mutex": body.mutex})
+    before = case.mutex or "none"
+    if body.mutex != before:
+        case.mutex = body.mutex
+        case.updated_by = case_service.actor(user) or case.owner
+        audit.log(db, user, "case.mutex", "case", case.code, {"from": before, "to": body.mutex})
+        db.commit()
+    return case_brief(case, yaml_text=case.yaml_text)
 
 
 @router.post("/{case_id}/validate")

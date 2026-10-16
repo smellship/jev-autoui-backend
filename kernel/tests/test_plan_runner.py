@@ -219,8 +219,13 @@ def test_run_dir_root_aggregates_trace_and_actions_with_plan_step(tmp_path):
     assert result.status == "ok"
     rows = [json.loads(line) for line in
             (result.run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert rows and all({"step", "url", "title"} <= set(row) for row in rows)
-    assert {row["plan_step"] for row in rows} == {1, 2}
+    kinds = [row.get("kind", "decision") for row in rows]
+    assert kinds[0] == "run_start" and kinds[-1] == "run_end"
+    assert {"step_start", "step_end", "decision", "assert"} <= set(kinds)
+    assert [row["seq"] for row in rows] == list(range(1, len(rows) + 1))
+    decisions = [row for row in rows if row.get("kind", "decision") == "decision"]
+    assert all({"step", "url", "title"} <= set(row) for row in decisions)
+    assert {row["plan_step"] for row in decisions} == {1, 2}
     actions = json.loads((result.run_dir / "actions.json").read_text(encoding="utf-8"))
     assert [item["action"] for item in actions] == ["CLICK", "CLICK"]
     assert {item["plan_step"] for item in actions} == {1, 2}

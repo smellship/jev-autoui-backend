@@ -132,10 +132,61 @@ def _trace_block(sub: Path) -> str:
     if not trace:
         return "<p class='meta'>没有 trace.jsonl</p>"
     actions = {a.get("step"): a for a in _load(sub / "actions.json") or [] if isinstance(a, dict)}
-    rows = "".join(_trace_row(row, actions.get(row.get("step"))) for row in trace)
-    return ("<details open><summary>决策与动作</summary><table>"
-            "<tr><th>#</th><th>操作</th><th>目标</th><th>置信</th><th>层级</th><th>结果</th><th>说明</th><th>变化</th></tr>"
-            f"{rows}</table></details>")
+    decisions = [row for row in trace if row.get("kind", "decision") == "decision"]
+    rows = "".join(_trace_row(row, actions.get(row.get("step"))) for row in decisions)
+    blocks = [_event_block(trace), _assert_block(trace)]
+    blocks.append("<details open><summary>决策与动作</summary><table>"
+                  "<tr><th>#</th><th>操作</th><th>目标</th><th>置信</th><th>层级</th>"
+                  "<th>结果</th><th>说明</th><th>变化</th></tr>"
+                  f"{rows}</table></details>")
+    return "".join(item for item in blocks if item)
+
+
+def _event_block(trace: list[dict]) -> str:
+    """运行/步边界与没产出决策的模型调用——时间线里的非决策行。"""
+    lines = [_event_line(row) for row in trace
+             if row.get("kind") in ("run_start", "run_end", "step_start", "step_end", "model")]
+    lines = [item for item in lines if item]
+    if not lines:
+        return ""
+    return ("<h3>运行事件</h3><div class='box info'><ul>"
+            + "".join(f"<li>{item}</li>" for item in lines) + "</ul></div>")
+
+
+def _event_line(row: dict) -> str:
+    kind, at = row.get("kind"), esc(row.get("at"))
+    if kind == "run_start":
+        what = "计划" if row.get("plan") else "运行"
+        name = row.get("plan") or row.get("task")
+        return f"{at} {what}开始：{esc(name)} · 模型 {esc(row.get('decision_model'))}"
+    if kind == "run_end":
+        return f"{at} 运行结束：{esc(row.get('status_label'))} · {esc(row.get('detail'))}"
+    if kind == "step_start":
+        return f"{at} 第 {esc(row.get('plan_step'))} 步开始：{esc(row.get('goal'))}"
+    if kind == "step_end":
+        return (f"{at} 第 {esc(row.get('plan_step'))} 步结束：{esc(row.get('status_label'))}"
+                f" · {esc(row.get('detail'))}")
+    if kind == "model":
+        return f"{at} 模型调用未产出决策（{esc(row.get('stage'))}）：{esc(row.get('error'))}"
+    return ""
+
+
+def _assert_block(trace: list[dict]) -> str:
+    asserts = [row for row in trace if row.get("kind") == "assert"]
+    if not asserts:
+        return ""
+    rows = []
+    for row in asserts:
+        mark = "✓" if row.get("ok") else "✗"
+        detail = "；".join(
+            f"{esc(c.get('kind'))}『{esc(c.get('expected'))}』{'✓' if c.get('ok') else '✗'}"
+            for c in row.get("checks") or []
+        )
+        rows.append(f"<tr><td class='mark'>{mark}</td><td class='num'>{esc(row.get('step'))}</td>"
+                    f"<td class='num'>{esc(row.get('attempts'))}</td>"
+                    f"<td class='num'>{esc(row.get('elapsed_ms'))}ms</td><td>{detail}</td></tr>")
+    return ("<h3>验收（轮询）</h3><table><tr><th></th><th>步</th><th>轮次</th><th>耗时</th><th>断言</th></tr>"
+            + "".join(rows) + "</table>")
 
 
 def _trace_row(row: dict, record: dict | None) -> str:

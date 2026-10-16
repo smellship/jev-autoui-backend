@@ -15,12 +15,15 @@ from datetime import datetime
 from pathlib import Path
 
 from ui_agent.config import Settings
-from ui_agent.decide.jev import JevEngine
+from ui_agent.decide.engine import Decider, make_engine
 from ui_agent.driver.playwright_ import Driver
 from ui_agent.llm.planner import plan_to_json
 from ui_agent.llm.supervisor import Supervisor
+from ui_agent.replay.cache import plan_case_hash
+from ui_agent.replay.session import CacheOutcome, ReplaySession, open_session
 from ui_agent.report.html import build_report
 from ui_agent.run.runner import Runner
+from ui_agent.run.trace import TraceWriter, cache_row, now_at
 from ui_agent.schema.plan import PlanStep, TestPlan
 from ui_agent.schema.state import RecentAction
 from ui_agent.schema.status import STATUS_LABELS
@@ -90,14 +93,15 @@ class PlanResult:
 
 class PlanRunner:
     def __init__(self, settings: Settings, plan: TestPlan, driver: Driver | None = None,
-                 engine: JevEngine | None = None, verbose: bool = True, run_dir: Path | None = None,
+                 engine: Decider | None = None, verbose: bool = True, run_dir: Path | None = None,
                  vars: dict[str, str] | None = None, history_carry: int = HISTORY_CARRY,
                  max_actions: int | None = None, max_decisions: int | None = None,
-                 supervisor: Supervisor | None = None, json_mode: bool = False):
+                 supervisor: Supervisor | None = None, json_mode: bool = False,
+                 cache: ReplaySession | None = None):
         self.s = settings
         self.plan = plan
         self.driver = driver or Driver(settings)
-        self.engine = engine or JevEngine(settings)
+        self.engine = engine or make_engine(settings)
         self.verbose = verbose
         self.json_mode = json_mode      # 追 JSON 时人类话术走 stderr，stdout 只留最后那份 JSON
         self.run_dir = run_dir
@@ -109,6 +113,8 @@ class PlanRunner:
             self.supervisor: Supervisor | None = supervisor
         else:
             self.supervisor = Supervisor(settings) if settings.ui_agent_supervisor else None
+        self.cache = cache              # 回放缓存会话；None 时 run() 按配置自动开（开不出就不碰）
+        self.cache_outcome: CacheOutcome | None = None
         self.defects: list[str] = []
 
     # --- 主流程 ---
@@ -126,6 +132,13 @@ class PlanRunner:
         if self.supervisor is not None:
             budget = self.supervisor.budget
             self._say(f"监督：每步最多 {budget.per_step} 次、本次运行最多 {budget.per_run} 次")
+        if self.cache is None:
+            self.cache = open_session(self.s, case_hash=plan_case_hash(self.plan),
+                                      base_url=self.plan.url, plan_name=self.plan.name,
+                                      run_id=run_dir.name)
+        if self.cache is not None:
+            for line in self.cache.boot_lines(self.s.ui_agent_decider):
+                self._say(line)
         result = PlanResult("error", run_dir, "未开始")
         outcomes: list[StepOutcome] = []
         history: list[RecentAction] = []
@@ -133,8 +146,11 @@ class PlanRunner:
         attempts: dict[int, int] = {}
         actions: list[dict] = []
         root_trace = None
+        writer = None
         try:
             root_trace = (run_dir / "trace.jsonl").open("w", encoding="utf-8")
+            writer = TraceWriter(root_trace)
+            writer.write(self._run_start_row())
             self.driver.start()
             index = 1
             while index <= len(self.plan.steps):
@@ -147,13 +163,22 @@ class PlanRunner:
                         self._say(f"备注：{step.note}")
                 if self.supervisor is not None:
                     self.supervisor.new_step()
+                if self.cache is not None:
+                    self.cache.begin_step(index)
+                writer.write({"kind": "step_start", "at": now_at(), "plan_step": index,
+                              "goal": step.goal, "attempt": attempts[index],
+                              "url": step.url or self.plan.url})
                 try:
                     outcome, history = self._step(run_dir, index, step, history, attempts[index],
-                                                  self._sink(root_trace, index))
+                                                  self._sink(writer, index))
                 except Exception as exc:
                     outcome = StepOutcome(index, step.goal, self._dir_name(index, step, attempts[index]),
                                           "error", f"{exc.__class__.__name__}: {exc}", attempt=attempts[index])
                 outcomes.append(outcome)
+                writer.write({"kind": "step_end", "at": now_at(), "plan_step": index,
+                              "status": outcome.status, "status_label": outcome.label,
+                              "detail": outcome.detail, "decisions": outcome.decisions,
+                              "attempt": outcome.attempt})
                 actions.extend(self._step_actions(run_dir, outcome))
                 self._say(self._line(outcome))
                 if outcome.success:
@@ -175,6 +200,8 @@ class PlanRunner:
             result.status = "error"
             result.detail = f"{exc.__class__.__name__}: {exc}"
         finally:
+            if self.cache is not None:
+                self.cache_outcome = self.cache.finalize()
             done = {o.index for o in outcomes}
             for index in range(1, len(self.plan.steps) + 1):
                 if index in done:
@@ -184,6 +211,10 @@ class PlanRunner:
                                             "前序步骤未通过，未执行"))
             if result.status != "ok":
                 self._shot(run_dir, "failure")
+            if writer is not None:
+                if self.cache_outcome is not None:
+                    writer.write(cache_row(self.cache_outcome))
+                writer.write(self._run_end_row(result, outcomes, started))
             if root_trace is not None:
                 root_trace.close()
             (run_dir / "actions.json").write_text(
@@ -218,7 +249,7 @@ class PlanRunner:
                         manage_driver=False, recent=history[-self.history_carry:], vars=self.vars,
                         max_actions=self.max_actions, max_decisions=self.max_decisions,
                         supervisor=self.supervisor, remaining_goals=remaining,
-                        json_mode=self.json_mode, trace_sink=trace_sink)
+                        json_mode=self.json_mode, trace_sink=trace_sink, cache=self.cache)
         result = runner.run()
         defects = [f"第{index}步 {item}" for item in result.defect_candidates]
         self.defects.extend(defects)
@@ -228,12 +259,43 @@ class PlanRunner:
         return outcome, runner.recent
 
     @staticmethod
-    def _sink(handle, index: int) -> Callable[[dict], None]:
-        """把某一步的 trace 行原样汇进运行目录根部的聚合 trace（补记它属于哪一步）。"""
+    def _sink(writer: TraceWriter, index: int) -> Callable[[dict], None]:
+        """把某一步的聚合行汇进运行目录根部的 trace（补记它属于哪一步）。"""
         def emit(row: dict) -> None:
-            handle.write(json.dumps({**row, "plan_step": index}, ensure_ascii=False) + "\n")
-            handle.flush()
+            writer.write({**row, "plan_step": index})
         return emit
+
+    def _run_start_row(self) -> dict:
+        return {
+            "kind": "run_start",
+            "at": now_at(),
+            "run_id": self.run_dir.name,
+            "plan": self.plan.name,
+            "url": self.plan.url,
+            "steps": len(self.plan.steps),
+            "mode": self.s.ui_agent_mode,
+            "headless": self.s.headless,
+            "viewport": self.s.ui_agent_viewport,
+            "decider": self.s.ui_agent_decider,
+            "decision_model": self.s.typesafe_model,
+            "text_model": self.s.text_model,
+            "supervisor": self.supervisor is not None,
+            "cache": self.cache is not None,
+            "cache_strict": self.cache.strict if self.cache is not None else False,
+            "vars": sorted(self.vars),
+        }
+
+    def _run_end_row(self, result: PlanResult, outcomes: list[StepOutcome], started: datetime) -> dict:
+        return {
+            "kind": "run_end",
+            "at": now_at(),
+            "status": result.status,
+            "status_label": result.label,
+            "detail": result.detail,
+            "steps": sum(1 for o in outcomes if o.status != "skipped"),
+            "duration_s": round((datetime.now() - started).total_seconds(), 1),
+            "defects": len(self.defects),
+        }
 
     @staticmethod
     def _step_actions(run_dir: Path, outcome: StepOutcome) -> list[dict]:
@@ -277,6 +339,7 @@ class PlanRunner:
             "mode": self.s.ui_agent_mode,
             "headless": self.s.headless,
             "viewport": self.s.ui_agent_viewport,
+            "decider": self.s.ui_agent_decider,
             "decision_model": self.s.typesafe_model,
             "text_model": self.s.text_model,
             "supervisor": bool(self.supervisor),

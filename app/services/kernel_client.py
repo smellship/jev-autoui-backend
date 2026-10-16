@@ -27,13 +27,16 @@ class KernelError(Exception):
         self.detail = detail or {}
 
 
-def child_env() -> dict:
+def child_env(profile_dir: Path | None = None) -> dict:
     env = os.environ.copy()
     # 内核 print 到管道时默认用 locale 编码（中文 Windows = GBK），强制 UTF-8
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
     # 设置页存的模型 Key 覆盖进程 env（存储值优先；内核 pydantic-settings 直接读环境变量）
     env.update(model_keys.env_overrides())
+    # 并发调度时按「人+路」注入独立登录态目录，绕开 Chromium 单实例锁（§10）
+    if profile_dir is not None:
+        env["UI_AGENT_PROFILE_DIR"] = str(profile_dir)
     return env
 
 
@@ -139,14 +142,14 @@ def kill_tree(pid: int) -> None:
 class KernelProcess:
     """长跑进程：输出落 kernel.log，可随时整棵树终止。"""
 
-    def __init__(self, args: list[str], log_path: Path):
+    def __init__(self, args: list[str], log_path: Path, profile_dir: Path | None = None):
         settings = get_settings()
         self.argv = build_argv(args)
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = self.log_path.open("wb")
         self.proc = subprocess.Popen(
-            self.argv, cwd=settings.kernel_cwd or None, env=child_env(),
+            self.argv, cwd=settings.kernel_cwd or None, env=child_env(profile_dir),
             stdout=self._handle, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **_spawn_kwargs(),
         )
         self.pid = self.proc.pid

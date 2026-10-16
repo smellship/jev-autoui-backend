@@ -14,6 +14,15 @@ def utcnow() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def iso_utc(value: datetime | None) -> str | None:
+    """库里的 naive UTC 出站时补回 +00:00 偏移：前端才能把时间正确换算到本地时区。"""
+    if not value:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.isoformat(timespec="seconds")
+
+
 class Seq(Base):
     """编号分配器：sc-0001 / sc-0001-01。"""
 
@@ -75,6 +84,7 @@ class Case(Base):
     tags: Mapped[list] = mapped_column(JSON, default=list)
     owner: Mapped[str] = mapped_column(String(64), default="")
     yaml_text: Mapped[str] = mapped_column(Text, default="")
+    mutex: Mapped[str] = mapped_column(String(10), default="none")  # 互斥挡：none|env|account
     current_version: Mapped[int] = mapped_column(Integer, default=1)
     created_by: Mapped[str] = mapped_column(String(64), default="")
     updated_by: Mapped[str] = mapped_column(String(64), default="")
@@ -155,6 +165,10 @@ class Run(Base):
     plan_json: Mapped[str] = mapped_column(Text, default="")  # 本次运行编译出的 TestPlan（同一份）
     artifact_dir: Mapped[str] = mapped_column(String(255), default="")
     triggered_by: Mapped[str] = mapped_column(String(64), default="")
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("user.id"), nullable=True, index=True)
+    mutex: Mapped[str] = mapped_column(String(10), default="none")  # 互斥挡快照（提交时的用例设置）
+    mutex_key: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 账号域键 sha256(env|账号|密码)
+    policy: Mapped[dict] = mapped_column(JSON, default=dict)  # 运行策略快照（decider/supervisor/cache/cache_strict）
     batch_code: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)  # b-20260929-150211
     suite_id: Mapped[int | None] = mapped_column(ForeignKey("suite.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

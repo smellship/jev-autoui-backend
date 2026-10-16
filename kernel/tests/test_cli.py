@@ -36,13 +36,36 @@ def test_parse_vars_accepts_values_with_equals_and_rejects_junk():
         parse_vars(["=值"])
 
 
-def test_no_supervisor_flag_turns_the_seam_off():
+def test_decider_and_supervisor_flags_reach_settings():
     from ui_agent.config import Settings
 
-    on = cli.apply_overrides(Settings(ui_agent_supervisor=True), SimpleNamespace(no_supervisor=True))
-    off = cli.apply_overrides(Settings(ui_agent_supervisor=True), SimpleNamespace(no_supervisor=False))
-    assert on.ui_agent_supervisor is False and off.ui_agent_supervisor is True
-    assert cli.apply_overrides(Settings(), SimpleNamespace(no_supervisor=False)).ui_agent_supervisor is True
+    off = cli.apply_overrides(Settings(ui_agent_supervisor=True), SimpleNamespace(supervisor="off"))
+    on = cli.apply_overrides(Settings(ui_agent_supervisor=False), SimpleNamespace(supervisor="on"))
+    assert off.ui_agent_supervisor is False and on.ui_agent_supervisor is True
+    assert cli.apply_overrides(Settings(), SimpleNamespace(supervisor=None)).ui_agent_supervisor is True
+
+    llm = cli.apply_overrides(Settings(), SimpleNamespace(decider="llm"))
+    assert llm.ui_agent_decider == "llm"
+    assert cli.apply_overrides(Settings(), SimpleNamespace(decider=None)).ui_agent_decider == "jev"
+
+
+def test_run_accepts_switch_flags_and_rejects_unknown_values(tmp_path, monkeypatch):
+    seen: dict = {}
+
+    class StubRunner:
+        def __init__(self, settings, *args, **kwargs):
+            seen["settings"] = settings
+
+        def run(self):
+            return stub_result(tmp_path)
+
+    monkeypatch.setattr(cli, "Runner", StubRunner)
+    assert main(["run", "--goal", "x", "--url", "http://x/",
+                 "--decider", "llm", "--supervisor", "off"]) == 0
+    assert seen["settings"].ui_agent_decider == "llm"
+    assert seen["settings"].ui_agent_supervisor is False
+    with pytest.raises(SystemExit):
+        main(["run", "--goal", "x", "--url", "http://x/", "--decider", "auto"])
 
 
 def test_dialog_policy_flag_reaches_settings(tmp_path, monkeypatch):

@@ -39,7 +39,7 @@ class TestValidateChoice:
         [
             {"choice": "PRESS", "probabilities": {"CLICK": 0.7, "WAIT": 0.3}, "confidence": 0.8},
             {"choice": "CLICK", "probabilities": {"CLICK": 0.7}, "confidence": 0.8},
-            {"choice": "CLICK", "probabilities": {"CLICK": 0.7, "WAIT": 0.4}, "confidence": 0.8},
+            {"choice": "CLICK", "probabilities": {"CLICK": 0.7, "WAIT": 0.6}, "confidence": 0.8},
             {"choice": "WAIT", "probabilities": {"CLICK": 0.7, "WAIT": 0.3}, "confidence": 0.8},
             {"choice": "CLICK", "probabilities": {"CLICK": 1.7, "WAIT": -0.7}, "confidence": 0.8},
             {"choice": "CLICK", "probabilities": {"CLICK": "0.7", "WAIT": "0.3"}, "confidence": 0.8},
@@ -49,6 +49,65 @@ class TestValidateChoice:
     def test_rejects_broken_answers(self, answer):
         with pytest.raises(ValueError):
             validate_choice(answer, {"CLICK", "WAIT"})
+
+    @pytest.mark.parametrize(
+        ("answer", "snippet"),
+        [
+            ({"choice": "PRESS", "probabilities": {"CLICK": 0.7, "WAIT": 0.3}, "confidence": 0.8},
+             "不在候选内"),
+            ({"choice": "CLICK", "probabilities": {"CLICK": 0.7}, "confidence": 0.8}, "键集不一致"),
+            ({"choice": "CLICK", "probabilities": {"CLICK": 0.7, "WAIT": 0.6}, "confidence": 0.8},
+             "总和"),
+            ({"choice": "WAIT", "probabilities": {"CLICK": 0.7, "WAIT": 0.3}, "confidence": 0.8},
+             "不是最大"),
+            ({"choice": "CLICK", "probabilities": {"CLICK": 1.7, "WAIT": -0.7}, "confidence": 0.8},
+             "非数字"),
+            ({"choice": "CLICK", "probabilities": {"CLICK": "0.7", "WAIT": "0.3"}, "confidence": 0.8},
+             "非数字"),
+            ({"probabilities": {"CLICK": 1.0}, "confidence": 0.9}, "结构不符"),
+            (None, "结构不符"),
+        ],
+    )
+    def test_rejections_name_the_broken_condition(self, answer, snippet):
+        with pytest.raises(ValueError) as excinfo:
+            validate_choice(answer, {"CLICK", "WAIT"})
+        message = str(excinfo.value)
+        assert snippet in message
+        assert "未通过校验" in message and "未执行任何动作" in message
+
+
+class TestProbabilityNormalization:
+    """小偏差不拒绝：重标定到和为 1（模型把概率四舍五入到两位小数是常态）。"""
+
+    def test_near_one_total_is_rescaled(self):
+        answer = {"choice": "CLICK", "probabilities": {"CLICK": 0.63, "WAIT": 0.42},
+                  "confidence": 0.8}
+        out = validate_choice(answer, {"CLICK", "WAIT"})
+        probs = out["probabilities"]
+        assert abs(sum(probs.values()) - 1) < 1e-6
+        assert probs["CLICK"] > probs["WAIT"], "重标定不改变 choice 的次序"
+
+    def test_under_one_total_is_rescaled(self):
+        answer = {"choice": "CLICK", "probabilities": {"CLICK": 0.5, "WAIT": 0.41},
+                  "confidence": 0.8}
+        out = validate_choice(answer, {"CLICK", "WAIT"})
+        assert abs(sum(out["probabilities"].values()) - 1) < 1e-6
+
+    @pytest.mark.parametrize("total", [0.85, 1.15])
+    def test_beyond_a_tenth_of_one_still_rejected(self, total):
+        answer = {"choice": "CLICK",
+                  "probabilities": {"CLICK": total * 0.6, "WAIT": total * 0.4},
+                  "confidence": 0.8}
+        with pytest.raises(ValueError) as excinfo:
+            validate_choice(answer, {"CLICK", "WAIT"})
+        assert "归一化" in str(excinfo.value)
+
+    def test_normalization_does_not_rescue_losing_choice(self):
+        answer = {"choice": "CLICK", "probabilities": {"CLICK": 0.42, "WAIT": 0.63},
+                  "confidence": 0.8}
+        with pytest.raises(ValueError) as excinfo:
+            validate_choice(answer, {"CLICK", "WAIT"})
+        assert "不是最大" in str(excinfo.value)
 
 
 class TestActionSpace:

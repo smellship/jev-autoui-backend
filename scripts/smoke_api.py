@@ -46,6 +46,7 @@ SECRET_ACCOUNT = "smoke-account-9527"
 SECRET_PASSWORD = "smoke-password-8531"
 MODEL_TEXT_KEY = "smoke-text-model-key-7421"
 MODEL_JEV_KEY = "smoke-typesafe-key-3164"
+SMOKE_RELAY_URL = "http://127.0.0.1:9/v1/systemone"  # 假中转地址：stub 不真调模型，只验证注入链路
 
 CASE_YAML = """id: sc-0001-01
 title: 83票
@@ -345,6 +346,19 @@ def step_model_keys(smoke: Smoke) -> str:
     blob = store.read_text(encoding="utf-8")
     assert MODEL_TEXT_KEY in blob and MODEL_JEV_KEY in blob, "文件里应有两把明文"
 
+    # 端点（地址/模型名）：可回显；用 http 证明中转站/本地 mock 类地址不被 https 硬卡
+    data = expect(smoke.call("PUT", "/settings/model-keys", json={
+        "typesafe_base_url": SMOKE_RELAY_URL, "text_model": "smoke-relay-text",
+    }), 200, "写模型端点")
+    eps = {item["key"]: item for item in data["endpoints"]}
+    assert eps["typesafe_base_url"]["value"] == SMOKE_RELAY_URL, eps
+    assert eps["typesafe_base_url"]["source"] == "file", eps
+    assert eps["text_model"]["value"] == "smoke-relay-text", eps
+    assert eps["text_model_base_url"]["value"] == "" and eps["text_model_base_url"]["source"] is None, eps
+    bad = expect(smoke.call("PUT", "/settings/model-keys",
+                            json={"typesafe_base_url": "ftp://relay.local"}), 422, "坏地址 422")
+    assert bad["code"] == "bad_url", bad
+
     # 真跑一次：桩在 kernel.log 里报「收到没收到」，验证注入真的到了子进程
     run = expect(smoke.call("POST", "/runs", json={
         "case_id": smoke.ids["case"], "env_id": smoke.ids["env"], "mode": "debug"}), 202, "带 Key 运行")
@@ -353,16 +367,24 @@ def step_model_keys(smoke: Smoke) -> str:
     log = smoke.call("GET", f"/runs/{run['id']}/artifacts/kernel.log")
     assert log.status_code == 200, f"kernel.log 取不到：{log.status_code}"
     assert "[stub] model-keys text=set jev=set" in log.text, log.text[-400:]
+    assert f"jev-url={SMOKE_RELAY_URL}" in log.text, log.text[-400:]
+    assert "text-model=smoke-relay-text" in log.text, log.text[-400:]
 
-    # 清除一把 → 状态翻转、文件里不再有；再写回，让末尾的明文扫描盯着两把都有效
+    # 清除一把 Key → 状态翻转、文件里不再有；再写回，让末尾的明文扫描盯着两把都有效
     cleared = expect(smoke.call("PUT", "/settings/model-keys",
                                 json={"text_model_api_key": ""}), 200, "清除文本模型 Key")
     assert cleared["changed"] == ["text_model_api_key"], cleared
     assert MODEL_TEXT_KEY not in store.read_text(encoding="utf-8"), "清除后文件里不该留明文"
     expect(smoke.call("PUT", "/settings/model-keys",
                       json={"text_model_api_key": MODEL_TEXT_KEY}), 200, "写回文本模型 Key")
-    return (f"两把 Key 只写不读（成员 403）；运行 {run['id']} 的 kernel.log 报 text=set jev=set；"
-            f"清除→写回也验证")
+    # 端点清空 = 回落内核默认（残留值会污染之后的真跑）
+    cleared = expect(smoke.call("PUT", "/settings/model-keys",
+                                json={"typesafe_base_url": "", "text_model": ""}), 200, "清端点")
+    assert sorted(cleared["changed"]) == ["text_model", "typesafe_base_url"], cleared
+    eps = {item["key"]: item for item in cleared["endpoints"]}
+    assert eps["typesafe_base_url"]["value"] == "" and eps["typesafe_base_url"]["source"] is None, eps
+    return (f"两把 Key 只写不读（成员 403）；运行 {run['id']} 的 kernel.log 报 text=set jev=set 且 "
+            f"jev-url/text-model 端点注入生效；清除→写回、端点清空回落默认也验证")
 
 
 def step_probe(smoke: Smoke) -> str:

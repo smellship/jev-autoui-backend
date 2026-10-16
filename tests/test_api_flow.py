@@ -209,7 +209,7 @@ def test_plan_preview_and_draft(client, auth, workspace):
     assert preview["ok"] is True and len(preview["plan"]["steps"]) == 5, preview
     check = preview["plan"]["steps"][1]["checks"][0]
     assert check == {"kind": "element_value", "value": "行政区域", "expected": "2102 大连",
-                     "role": "行政区域"}, check
+                     "role": "", "attr": "", "timeout_ms": 0}, check
 
     draft = expect(client.post(f"{API}/cases/{case_id}/drafts", headers=auth,
                                json={"desc": "登录后按发票号查询并上传 PDF"}), 200, "自然语言草稿")
@@ -315,6 +315,13 @@ def test_sse_streams_status_trace_done(client, auth, workspace):
     assert "status" in events and "done" in events, events
     assert events.count("trace") >= 2, events
     assert events.index("trace") < events.index("done"), events
+
+
+def test_run_timestamps_carry_utc_offset(client, auth, workspace):
+    """时间出站必须带偏移：前端 new Date() 才能按上海时间正确展示与计时。"""
+    data = wait_run(client, auth, workspace["run"])
+    for field in ("created_at", "started_at", "finished_at"):
+        assert data[field] and data[field].endswith("+00:00"), (field, data[field])
 
 
 def test_run_ci_failure(client, auth, workspace):

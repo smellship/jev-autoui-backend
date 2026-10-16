@@ -64,7 +64,7 @@ class ScriptedEngine:
         self.pos: dict[str, int] = {}
         self.rules: list[list[str] | None] = []
 
-    def decide(self, state: State, goal: str, rules=None) -> Decision:
+    def decide(self, state: State, goal: str, rules=None, error_context=None) -> Decision:
         script = self.scripts[goal]
         at = self.pos.get(goal, 0)
         if at >= len(script):
@@ -125,7 +125,8 @@ def trace_of(sub: Path) -> list[dict]:
     path = sub / "trace.jsonl"
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [row for row in rows if row.get("kind", "decision") == "decision"]
 
 
 def main() -> int:
@@ -133,7 +134,7 @@ def main() -> int:
     parser.add_argument("--headed", action="store_true", help="可视化跑一遍（会弹窗）")
     args = parser.parse_args()
 
-    settings = Settings(ui_agent_mode="debug" if args.headed else "ci")
+    settings = Settings(ui_agent_mode="debug" if args.headed else "ci", ui_agent_cache=False)
     plan = Plan(name="本地夹具监督冒烟", url=FIXTURE.as_uri(), steps=[
         PlanStep(goal="登录并在重复点击后停下",
                  checks=[CheckSpec(kind="text_contains", expected="已登录：smoke-user")]),

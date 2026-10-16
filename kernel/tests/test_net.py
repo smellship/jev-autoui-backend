@@ -10,9 +10,10 @@ from ui_agent.net import post_json
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload: dict | None = None):
+    def __init__(self, status_code: int, payload: dict | None = None, text: str = ""):
         self.status_code = status_code
         self._payload = payload or {}
+        self.text = text
         self.headers: dict = {}
 
     @property
@@ -64,6 +65,13 @@ def test_transport_error_gives_up_after_retries(monkeypatch):
 def test_http_500_is_not_retried(monkeypatch):
     stub = client_of(monkeypatch, [FakeResponse(500), FakeResponse(200, {"ok": 1})])
     with pytest.raises(RuntimeError, match="HTTP 500"):
+        post_json("http://x/", "k", {}, label="文本模型")
+    assert stub.calls == 1
+
+
+def test_http_error_message_includes_server_body(monkeypatch):
+    stub = client_of(monkeypatch, [FakeResponse(400, text='{"error": {"message": "expected bad"}}')])
+    with pytest.raises(RuntimeError, match="expected bad"):
         post_json("http://x/", "k", {}, label="文本模型")
     assert stub.calls == 1
 

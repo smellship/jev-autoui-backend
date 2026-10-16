@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 
-from fakes import FakeDriver, FakeEngine, blocked, click, done, read_trace, settings_for, snapshot
+from fakes import FakeDriver, FakeEngine, blocked, click, done, read_rows, read_trace, settings_for, snapshot
 
 from ui_agent.run.runner import Runner
 from ui_agent.schema.decision import Decision
 from ui_agent.verify.asserts import parse_check
 
 
-def make_runner(tmp_path, snapshots, decisions, checks=()):
-    settings = settings_for(tmp_path)
+def make_runner(tmp_path, snapshots, decisions, checks=(), **over):
+    settings = settings_for(tmp_path, **over)
     driver = FakeDriver(snapshots)
     driver.s = settings
     engine = FakeEngine(decisions)
@@ -53,11 +53,13 @@ def test_done_without_checks_is_not_success(tmp_path):
 
 
 def test_failed_checks_are_told_to_the_model_then_give_up(tmp_path):
+    # 关掉轮询（窗口 0 = 只评一次）：这条测的是升级/放弃机制，轮询语义在别处测
     runner, _, engine = make_runner(
         tmp_path,
         [snapshot("a"), snapshot("a"), snapshot("a")],
         [done(), done()],
         checks=["text_contains=票据类型"],
+        ui_agent_assert_timeout_ms=0,
     )
     result = runner.run()
     assert result.status == "check_failed" and result.steps == 1
@@ -165,7 +167,7 @@ def test_ci_mode_keeps_only_the_failure_screenshot(tmp_path):
     assert saved["mode"] == "ci" and saved["headless"] is False
 
 
-def test_trace_sink_gets_the_same_rows_as_the_trace_file(tmp_path):
+def test_trace_sink_gets_aggregated_rows_and_lifecycle_stays_in_file(tmp_path):
     rows: list[dict] = []
     settings = settings_for(tmp_path)
     driver = FakeDriver([snapshot("a"), snapshot("b", text="查询完成"), snapshot("b", text="查询完成")])
@@ -175,5 +177,50 @@ def test_trace_sink_gets_the_same_rows_as_the_trace_file(tmp_path):
                     trace_sink=rows.append)
     result = runner.run()
 
-    assert [row["operation"] for row in rows] == ["CLICK", "DONE"]
-    assert rows == read_trace(result.run_dir)
+    # 汇总口只收决策/断言/模型行（生命周期行留在各自文件里，不搬进聚合 trace）
+    assert [row["kind"] for row in rows] == ["decision", "decision", "assert"]
+    assert [row["operation"] for row in rows if row["kind"] == "decision"] == ["CLICK", "DONE"]
+    file_rows = read_rows(result.run_dir)
+    assert [row["kind"] for row in file_rows] == ["run_start", "decision", "decision", "assert", "run_end"]
+    assert rows == [row for row in file_rows if row["kind"] in ("decision", "assert")]  # 同内容、同 seq
+
+
+def test_slow_page_is_retried_before_failing_the_done(tmp_path):
+    """页面有理化延迟：断言轮询重读快照，不必再花一次模型往返。"""
+    runner, _, engine = make_runner(
+        tmp_path,
+        [snapshot("a"), snapshot("b", text="结果就绪"), snapshot("b", text="结果就绪")],
+        [done()],
+        checks=["text_contains=结果就绪"],
+    )
+    result = runner.run()
+
+    assert result.status == "ok" and len(engine.seen_states) == 1
+    rows = read_rows(result.run_dir)
+    last_assert = next(row for row in reversed(rows) if row.get("kind") == "assert")
+    assert last_assert["ok"] and last_assert["attempts"] == 2
+
+
+def test_done_without_checks_writes_no_assert_row(tmp_path):
+    runner, _, _ = make_runner(tmp_path, [snapshot("a")], [done()], checks=[])
+    result = runner.run()
+
+    assert result.status == "done_unverified"
+    assert not any(row.get("kind") == "assert" for row in read_rows(result.run_dir))
+
+
+def test_trace_has_run_boundaries_and_keeps_legacy_time_field(tmp_path):
+    runner, _, _ = make_runner(
+        tmp_path,
+        [snapshot("a"), snapshot("b", text="查询完成"), snapshot("b", text="查询完成")],
+        [click(), done()],
+        checks=["text_contains=查询完成"],
+    )
+    result = runner.run()
+
+    rows = read_rows(result.run_dir)
+    assert [row["seq"] for row in rows] == list(range(1, len(rows) + 1))
+    assert rows[0]["kind"] == "run_start" and rows[0]["task"] == "t"
+    assert rows[-1]["kind"] == "run_end" and rows[-1]["status"] == "ok"
+    decisions = [row for row in rows if row["kind"] == "decision"]
+    assert all({"step", "url", "title", "time", "at"} <= set(row) for row in decisions)

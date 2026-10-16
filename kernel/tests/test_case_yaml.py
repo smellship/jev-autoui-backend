@@ -40,7 +40,8 @@ def test_good_case_compiles_to_plan_with_lines_and_no_errors():
     assert plan["name"] == "83票查询" and len(plan["steps"]) == 2
     assert plan["vars"]["账号"] == "${{secret.账号}}"  # 引用原样带出，值不在用例里
     assert plan["steps"][1]["checks"][0] == {"kind": "element_value", "value": "行政区域",
-                                             "expected": "2102 大连", "role": ""}
+                                             "expected": "2102 大连", "role": "",
+                                             "attr": "", "timeout_ms": 0}
     # 编译结果必须能被计划执行器原样吃进去
     assert [step.goal for step in plan_from_json(json.dumps(plan)).steps] == \
            [step["goal"] for step in plan["steps"]]
@@ -163,3 +164,43 @@ def test_plan_can_be_emitted_back_to_yaml_and_recompiled():
     again = compile_case(text, ["账号"])
     assert again["ok"] is True
     assert again["plan"]["steps"][1]["checks"][0]["expected"] == "2102 大连"
+
+
+def test_new_assertion_forms_compile_and_round_trip():
+    text = ("steps:\n  - goal: 核对结果\n    checks:\n"
+            "      - element_count: 模拟行|3\n"
+            "      - element_count: 2\n"
+            "      - {kind: element_attribute, value: 下载使用手册, attr: href,"
+            " expected: /help/manual.pdf, timeout_ms: 9000}\n")
+    result = compile_case(text, [])
+    assert result["ok"] is True, result["errors"]
+    specs = result["plan"]["steps"][0]["checks"]
+    assert (specs[0]["value"], specs[0]["expected"]) == ("模拟行", "3")
+    assert (specs[1]["value"], specs[1]["expected"]) == ("", "2")  # 只给个数 = 不限定标签
+    assert specs[2]["attr"] == "href" and specs[2]["timeout_ms"] == 9000
+
+    again = compile_case(plan_to_case_yaml(Plan(**result["plan"])), None)
+    assert again["ok"] is True, again["errors"]
+    assert again["plan"]["steps"][0]["checks"] == specs  # 反向生成再编译，语义不变
+
+
+def test_new_assertion_forms_reject_bad_input():
+    missing_attr = compile_case(
+        "steps:\n  - goal: 看\n    checks:\n"
+        "      - {kind: element_attribute, value: 下载, expected: /x}\n", [])
+    assert missing_attr["ok"] is False and "attr" in missing_attr["errors"][0]["message"]
+
+    bad_count = compile_case("steps:\n  - goal: 看\n    checks:\n      - element_count: 很多\n", [])
+    assert bad_count["ok"] is False and "整数" in bad_count["errors"][0]["message"]
+
+    bad_timeout = compile_case(
+        "steps:\n  - goal: 看\n    checks:\n"
+        "      - {kind: text_contains, value: a, timeout_ms: 快}\n", [])
+    assert bad_timeout["ok"] is False and "timeout_ms" in bad_timeout["errors"][0]["message"]
+
+
+def test_count_assertion_counts_as_result_evidence():
+    text = ("steps:\n  - goal: 搜索出两条记录\n    checks:\n      - element_count: 记录|2\n")
+    result = compile_case(text, [])
+    assert result["ok"] is True
+    assert codes(result, "warnings") == set()  # 计数断言能证明结果，不算弱断言

@@ -63,7 +63,7 @@ class ScriptedEngine:
         self.pos: dict[str, int] = {}
         self.calls: list[tuple[str, int]] = []
 
-    def decide(self, state: State, goal: str, rules=None) -> Decision:
+    def decide(self, state: State, goal: str, rules=None, error_context=None) -> Decision:
         script = self.scripts[goal]
         at = self.pos.get(goal, 0)
         if at >= len(script):
@@ -102,7 +102,8 @@ def main() -> int:
     args = parser.parse_args()
 
     settings = Settings(ui_agent_mode="debug" if args.headed else "ci",
-                        ui_agent_headless=not args.headed, ui_agent_supervisor=False)
+                        ui_agent_headless=not args.headed, ui_agent_supervisor=False,
+                        ui_agent_cache=False)
     plan = Plan(name="本地夹具两步计划", url=FIXTURE.as_uri(), steps=[
         PlanStep(goal="填写登录信息并点确定",
                  checks=[CheckSpec(kind="text_contains", expected="已登录：smoke-user")]),
@@ -163,14 +164,25 @@ def main() -> int:
               "screenshots/" not in text or (run_dir / "screenshots").exists() is False)
 
     print("\n[5] 平台契约产物（P0）")
-    root_trace = [json.loads(line) for line in
-                  (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
-    check("运行目录根部有聚合 trace.jsonl，每行都有 step/url/title",
-          bool(root_trace) and all({"step", "url", "title"} <= set(row) for row in root_trace),
-          f"{len(root_trace)} 行")
+    root_rows = [json.loads(line) for line in
+                 (run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    kinds = [row.get("kind", "decision") for row in root_rows]
+    decisions = [row for row in root_rows if row.get("kind", "decision") == "decision"]
+    check("聚合 trace 分层：run_start 开头、run_end 结尾、步边界齐全",
+          kinds and kinds[0] == "run_start" and kinds[-1] == "run_end"
+          and {"step_start", "step_end"} <= set(kinds), "、".join(kinds))
+    check("seq 单调连续（文件里的行序即事件序）",
+          [row.get("seq") for row in root_rows] == list(range(1, len(root_rows) + 1)),
+          str([row.get("seq") for row in root_rows][:12]))
+    check("决策行都有 step/url/title",
+          bool(decisions) and all({"step", "url", "title"} <= set(row) for row in decisions),
+          f"{len(decisions)} 行")
     check("聚合 trace 覆盖两步（plan_step 1/2）",
-          {row.get("plan_step") for row in root_trace} == {1, 2},
-          str(sorted({row.get("plan_step") for row in root_trace})))
+          {row.get("plan_step") for row in decisions} == {1, 2},
+          str(sorted({row.get("plan_step") for row in decisions})))
+    check("验收轮询记进时间线（assert 行全过）",
+          any(row.get("kind") == "assert" and row.get("ok") for row in root_rows),
+          str([row.get("ok") for row in root_rows if row.get("kind") == "assert"]))
     root_actions = load_json(run_dir / "actions.json") if (run_dir / "actions.json").exists() else []
     check("运行目录根部有聚合 actions.json（带 plan_step）",
           bool(root_actions) and {item.get("plan_step") for item in root_actions} == {1, 2},

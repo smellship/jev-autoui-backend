@@ -37,21 +37,53 @@ PRESS_KEYS = {
 }
 
 
+def _preview(names, cap: int = 6) -> str:
+    ordered = sorted(names, key=str)
+    joined = ", ".join(str(name) for name in ordered[:cap])
+    return f"{joined} …（共 {len(ordered)} 个）" if len(ordered) > cap else joined
+
+
 def validate_choice(answer: dict, ids) -> dict:
+    """校验落点答复；被拒时点名违反的条件（否则事后只能靠重跑猜原因）。"""
+    keys = set(ids)
+
+    def fail(why: str) -> None:
+        raise ValueError(f"决策模型响应未通过校验（{why}）；未执行任何动作。")
+
     try:
         probabilities = answer["probabilities"]
-        numbers = [*probabilities.values(), answer["confidence"]]
-        valid = (
-            answer["choice"] in ids
-            and set(probabilities) == set(ids)
-            and all(type(n) in (int, float) and math.isfinite(n) and 0 <= n <= 1 for n in numbers)
-            and abs(sum(probabilities.values()) - 1) < 0.02
-            and probabilities[answer["choice"]] >= max(probabilities.values()) - 1e-6
-        )
-    except (KeyError, TypeError, ValueError):
-        valid = False
-    if not valid:
-        raise ValueError("决策模型响应未通过校验；未执行任何动作。")
+        chosen = answer["choice"]
+        confidence = answer["confidence"]
+    except (KeyError, TypeError, AttributeError) as exc:
+        fail(f"答复结构不符：{exc!r}")
+    if chosen not in keys:
+        fail(f"choice={chosen!r} 不在候选内（候选：{_preview(keys)}）")
+    if not isinstance(probabilities, dict):
+        fail(f"probabilities 不是对象（{type(probabilities).__name__}）")
+    missing, extra = keys - set(probabilities), set(probabilities) - keys
+    if missing or extra:
+        detail = []
+        if missing:
+            detail.append(f"缺键 {_preview(missing)}")
+        if extra:
+            detail.append(f"多键 {_preview(extra)}")
+        fail("probabilities 与候选键集不一致：" + "；".join(detail))
+    numbers = [*probabilities.values(), confidence]
+    if any(type(n) not in (int, float) or not math.isfinite(n) or not 0 <= n <= 1 for n in numbers):
+        fail(f"存在超出 [0,1] 或非数字的值：{_preview(numbers)}")
+    total = sum(probabilities.values())
+    if not 0.9 <= total <= 1.1:
+        fail(f"probabilities 总和={total:.3f}，偏离 1 超过 0.1（区间 [0.9, 1.1] 外无法归一化）")
+    if abs(total - 1) >= 0.02:
+        # 小偏差不拒绝而是归一化：模型把概率四舍五入到两位小数很常见（如 0.63+0.41=1.04），
+        # 拒绝会让整步白费；概率只用于展示与并列比较，等比重标定不改变 choice 的次序
+        scale = 1.0 / total
+        answer["probabilities"] = {name: round(value * scale, 4)
+                                   for name, value in probabilities.items()}
+        probabilities = answer["probabilities"]
+    top = max(probabilities.values())
+    if probabilities[chosen] < top - 1e-6:
+        fail(f"choice={chosen!r} 的概率 {probabilities[chosen]} 不是最大（最大 {top}）")
     return answer
 
 
@@ -184,14 +216,52 @@ def build_questions(state: State, goal: str, rules: list[str] | None = None) -> 
     return questions, targets
 
 
+def assemble_decision(state: State, questions: dict, answers: dict, *, model: str, usage: dict,
+                      latency_ms: int) -> Decision:
+    """把 answers 组装成 Decision：Jev 直答与大模型代班共用同一套落点校验。"""
+    operation_answer = validate_choice(answers.get("operation", {}), set(questions["operation"]["criteria"]))
+    operation = operation_answer["choice"]
+    decision = Decision(
+        operation=operation,
+        confidence=float(operation_answer["confidence"]),
+        operation_probabilities=operation_answer["probabilities"],
+        model=model,
+        usage=usage,
+        raw_answers=answers,
+        latency_ms=latency_ms,
+    )
+    head = operation.lower() + "_target"
+    if head in questions:
+        answer = validate_choice(answers.get(head, {}), set(questions[head]["criteria"]))
+        decision.target = answer["choice"]
+        decision.target_probabilities = answer["probabilities"]
+        if operation == "SELECT":
+            element_index, _, option_number = answer["choice"].partition(":")
+            decision.target_element = int(element_index)
+            element = next((el for el in state.elements if el.index == decision.target_element), None)
+            option = next((o for o in (element.options if element else []) if o.key == answer["choice"]), None)
+            if option is None:
+                raise ValueError("SELECT 目标选项不在当次快照中；未执行任何动作。")
+            decision.target_option = option.dom_index
+            _ = option_number
+        elif operation == "PRESS_KEY":
+            decision.press_key = answer["choice"]
+        else:
+            decision.target_element = int(answer["choice"])
+    elif operation not in ("WAIT", "DONE", "BLOCKED", "SCROLL_UP", "SCROLL_DOWN"):
+        raise ValueError(f"操作 {operation} 缺少目标 head；未执行任何动作。")
+    return decision
+
+
 class JevEngine:
     def __init__(self, settings: Settings):
         self.s = settings
 
-    def decide(self, state: State, goal: str, rules: list[str] | None = None) -> Decision:
+    def decide(self, state: State, goal: str, rules: list[str] | None = None,
+               error_context: str | None = None) -> Decision:
         if not self.s.typesafe_api_key:
             raise RuntimeError("缺少 TYPESAFE_API_KEY；请在 .env 中补上后再实跑。")
-        questions, targets = build_questions(state, goal, rules)
+        questions, _ = build_questions(state, goal, rules)
         body = {
             "model": self.s.typesafe_model,
             "state": to_jev_state(state),
@@ -199,36 +269,6 @@ class JevEngine:
         }
         started = time.perf_counter()
         result = post_json(self.s.typesafe_base_url, self.s.typesafe_api_key, body, label="决策模型")
-        answers = result.get("answers", {})
-        operation_answer = validate_choice(answers.get("operation", {}), set(questions["operation"]["criteria"]))
-        operation = operation_answer["choice"]
-        decision = Decision(
-            operation=operation,
-            confidence=float(operation_answer["confidence"]),
-            operation_probabilities=operation_answer["probabilities"],
-            model=result.get("model", ""),
-            usage=result.get("usage", {}),
-            raw_answers=answers,
-            latency_ms=round((time.perf_counter() - started) * 1000),
-        )
-        head = operation.lower() + "_target"
-        if head in questions:
-            answer = validate_choice(answers.get(head, {}), set(questions[head]["criteria"]))
-            decision.target = answer["choice"]
-            decision.target_probabilities = answer["probabilities"]
-            if operation == "SELECT":
-                element_index, _, option_number = answer["choice"].partition(":")
-                decision.target_element = int(element_index)
-                element = next((el for el in state.elements if el.index == decision.target_element), None)
-                option = next((o for o in (element.options if element else []) if o.key == answer["choice"]), None)
-                if option is None:
-                    raise ValueError("SELECT 目标选项不在当次快照中；未执行任何动作。")
-                decision.target_option = option.dom_index
-                _ = option_number
-            elif operation == "PRESS_KEY":
-                decision.press_key = answer["choice"]
-            else:
-                decision.target_element = int(answer["choice"])
-        elif operation not in ("WAIT", "DONE", "BLOCKED", "SCROLL_UP", "SCROLL_DOWN"):
-            raise ValueError(f"操作 {operation} 缺少目标 head；未执行任何动作。")
-        return decision
+        return assemble_decision(state, questions, result.get("answers", {}),
+                                 model=result.get("model", ""), usage=result.get("usage", {}),
+                                 latency_ms=round((time.perf_counter() - started) * 1000))

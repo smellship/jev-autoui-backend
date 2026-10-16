@@ -11,6 +11,7 @@ from app.models.tables import (
     Suite,
     SuiteCase,
     User,
+    iso_utc,
     utcnow,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "Suite",
     "SuiteCase",
     "User",
+    "iso_utc",
     "utcnow",
 ]

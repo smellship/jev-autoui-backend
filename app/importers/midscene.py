@@ -4,8 +4,8 @@
 - 动作与 expect 按出现顺序落成步骤，expect 挂到它前面的那一步；
 - 没有断言的步骤用「下一步入口元素」补一条 element_exists（前瞻）——既让每步都有事实可查，
   也满足内核 lint 的「每步必须有断言」；连下一步也借不到时用自身控件兜底，并如实标注；
-- 最后一步没有结果型断言（text_contains / element_value / element_absent）时报告点明
-  「只证明控件还在」，不假装它是验收。
+- 最后一步没有结果型断言（text_contains / element_value / element_absent / element_count /
+  element_attribute）时报告点明「只证明控件还在」，不假装它是验收。
 
 值不进 goal：输入的值收进 vars（键取目标描述的核心词）；键像凭据就改写成 ${{secret.键}} 引用，
 字面量不写进用例。
@@ -19,7 +19,8 @@ from typing import Any
 
 import yaml
 
-RESULT_KINDS = ("text_contains", "element_value", "element_absent")
+RESULT_KINDS = ("text_contains", "element_value", "element_absent",
+                "element_count", "element_attribute")
 MAX_STEPS = 12                  # 与内核一致，只用于报告提示
 MAX_CHECKS_PER_STEP = 3
 SENSITIVE_WORDS = ("密码", "口令", "password", "passwd", "token", "secret", "凭据", "密钥")
@@ -56,7 +57,7 @@ IGNORED_CALLS = {
 }
 # 认得出、但必须人工处理的调用（名字 → 提示）
 MANUAL_CALLS = {
-    "aiAssert": "自然语言断言无法静态转换：请人工补一条确定性断言（text_contains / element_value）",
+    "aiAssert": "自然语言断言无法静态转换：请人工补一条确定性断言（text_contains / element_value / element_count）",
     "aiScroll": "滚动动作暂不支持转换：请人工补成目标描述（例：滚动到「列表」）",
     "aiDoubleClick": "双击动作暂不支持转换：请人工补成目标描述",
     "aiRightClick": "右键点击动作暂不支持转换：请人工补成目标描述",
@@ -289,8 +290,8 @@ def _fill_checks(steps: list[_Step], notes: list[str]) -> None:
         if own:
             step.checks = [{"element_exists": own}]
             step.origin = "fallback"
-            tail = ("末端的业务结果没有验证到，建议人工补结果断言（text_contains / element_value）"
-                    if index == len(steps) - 1 else "建议人工补一条断言")
+            tail = ("末端的业务结果没有验证到，建议人工补结果断言（text_contains / element_value / "
+                    "element_count）" if index == len(steps) - 1 else "建议人工补一条断言")
             notes.append(f"第 {index + 1} 步「{step.goal(index)}」借不到下一步的元素，"
                          f"用自身控件兜底：{tail}")
         else:
@@ -330,7 +331,7 @@ def _review(steps: list[_Step], notes: list[str]) -> None:
     kinds = [kind for check in last.checks for kind in check]
     if kinds and not any(kind in RESULT_KINDS for kind in kinds):
         notes.append("最后一步没有能证明业务结果的断言（text_contains / element_value / "
-                     "element_absent）：只证明控件还在，结果对不对没验证")
+                     "element_absent / element_count）：只证明控件还在，结果对不对没验证")
     if len(steps) > MAX_STEPS:
         notes.append(f"共 {len(steps)} 步，超过内核建议上限 {MAX_STEPS}：拆成多条用例更好定位问题")
     for index, step in enumerate(steps):

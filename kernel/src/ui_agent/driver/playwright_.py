@@ -404,3 +404,13 @@ class Driver:
         if index is None:
             return self.page.evaluate(js, arg)
         return self.frame_of(index).evaluate(js, arg)
+
+    def get_attribute(self, index: int, name: str) -> str:
+        """只读属性（断言用）：属性不存在 / 元素已不在当次快照 / 读取失败 → 空串。
+
+        断言侧把空串当"没有这个值"处理；轮询会换一份新快照再试，所以不用在这里重试。
+        """
+        try:
+            return self.locator(index).get_attribute(name, timeout=2000) or ""
+        except (StaleTarget, PlaywrightError):
+            return ""

@@ -59,7 +59,7 @@ class ScriptedEngine:
         self.script = list(script)
         self.calls: list[str] = []
 
-    def decide(self, state: State, goal: str, rules=None) -> Decision:
+    def decide(self, state: State, goal: str, rules=None, error_context=None) -> Decision:
         if not self.script:
             raise AssertionError(f"『{goal}』的脚本用完了（第 {len(self.calls) + 1} 次决策）")
         operation, label = self.script.pop(0)
@@ -99,7 +99,7 @@ def snapshot_text(run_dir: Path, step: int) -> str:
 
 
 def run_case(tag: str, goal: str, script, checks: list[str], vars: dict, ui_mode: str, **over):
-    settings = Settings(ui_agent_mode=ui_mode, ui_agent_supervisor=False, **over)
+    settings = Settings(ui_agent_mode=ui_mode, ui_agent_supervisor=False, ui_agent_cache=False, **over)
     driver = Driver(settings)
     runner = Runner(settings, goal, FIXTURE.as_uri(), checks=[parse_check(c) for c in checks],
                     task=f"upload-{tag}", driver=driver, engine=ScriptedEngine(script), vars=vars)
@@ -123,8 +123,9 @@ def upload_case(tag: str, mode: str, files: list[Path], ui_mode: str) -> None:
                       ui_mode, ui_agent_upload_mode=mode)
 
     check(f"[{tag}] 运行状态 ok 且断言通过", result.success, f"{result.status} {result.detail}")
-    trace = [json.loads(line) for line in
-             (result.run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [json.loads(line) for line in
+            (result.run_dir / "trace.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    trace = [row for row in rows if row.get("kind", "decision") == "decision"]
     first = trace[0]
     check(f"[{tag}] 上传动作走的是 {level}",
           first["operation"] == "UPLOAD" and first["action"]["ok"] and first["action"]["level"] == level,

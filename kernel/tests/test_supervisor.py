@@ -5,7 +5,18 @@ from __future__ import annotations
 import json
 
 import pytest
-from fakes import FakeDriver, FakeEngine, ScriptedSupervisor, blocked, click, done, read_trace, settings_for, snapshot
+from fakes import (
+    FakeDriver,
+    FakeEngine,
+    ScriptedSupervisor,
+    blocked,
+    click,
+    done,
+    read_rows,
+    read_trace,
+    settings_for,
+    snapshot,
+)
 
 from ui_agent.config import Settings
 from ui_agent.decide.prompts import NEXT_ACTION
@@ -180,7 +191,7 @@ class TestSupervisorSeam:
 class TestEscalate:
     def test_no_supervisor_means_m0_behaviour(self):
         verdict = escalate(None, state_of(snapshot("a")), "目标", "blocked", "详情")
-        assert verdict.is_unavailable and "--no-supervisor" in verdict.detail
+        assert verdict.is_unavailable and "--supervisor off" in verdict.detail
         assert verdict.trace()["ruling"] is None and "error" in verdict.trace()
 
     def test_missing_key_is_unavailable(self):
@@ -312,17 +323,19 @@ class TestAbortAndReplanInTheLoop:
         assert runner.supervisor is None
         result = runner.run()
         assert result.status == "blocked"
-        assert "--no-supervisor" in read_trace(result.run_dir)[0]["supervisor"]["error"]
+        assert "--supervisor off" in read_trace(result.run_dir)[0]["supervisor"]["error"]
 
 
 class TestFailedChecksEscalation:
+    # 这两条测的是「升级机制」本身：关掉断言轮询（窗口 0 = 只评一次），
+    # 让首次 DONE 未过就直接走升级路径；轮询的语义在 test_asserts.py 里单独测。
     def test_first_failed_done_asks_the_supervisor(self, tmp_path):
         sup = ScriptedSupervisor([{"ruling": "HINT", "hint": "结果列表还没加载完"}])
         runner, _, engine = make_runner(
             tmp_path,
             [snapshot("a"), snapshot("b", text="票据类型：电子发票")],
             [done(), done()],
-            sup, checks=["text_contains=票据类型"],
+            sup, checks=["text_contains=票据类型"], ui_agent_assert_timeout_ms=0,
         )
         result = runner.run()
 
@@ -333,6 +346,62 @@ class TestFailedChecksEscalation:
     def test_second_failed_done_stops_even_with_a_supervisor(self, tmp_path):
         sup = ScriptedSupervisor([{"ruling": "HINT", "hint": "再看一眼"}])
         runner, _, _ = make_runner(tmp_path, [snapshot("a")] * 4, [done(), done(), done()],
-                                   sup, checks=["text_contains=票据类型"])
+                                   sup, checks=["text_contains=票据类型"],
+                                   ui_agent_assert_timeout_ms=0)
         result = runner.run()
         assert result.status == "check_failed" and len(sup.asked) == 1
+
+
+class TestInvalidAnswerEscalation:
+    """决策答复被拒（密封校验/信封）不直接判死：接入监督缝，由裁决决定继续或收尾。"""
+
+    def test_rejected_answer_escalates_instead_of_killing_the_run(self, tmp_path):
+        """Phase 1 两次都败 → Phase 2（思考）五次都败 → 监督介入 → HINT 后成功。"""
+        from ui_agent.decide.delegate import LlmEngine
+
+        class FlakyEngine(LlmEngine):
+            def __init__(self, settings):
+                super().__init__(settings)
+                self.calls = 0
+                self.rules: list = []
+
+            def decide(self, state, goal, rules=None, error_context=None):
+                self.calls += 1
+                self.rules.append(rules)
+                # Phase 1 两次都败
+                if self.calls <= 2:
+                    raise ValueError("决策模型响应未通过校验（probabilities 与候选键集不一致）")
+                return done()
+
+            def decide_thinking(self, state, goal, rules=None, error_context=None):
+                self.calls += 1
+                self.rules.append(rules)
+                # Phase 2 五次都败
+                if self.calls <= 7:
+                    raise ValueError("思考模型也未通过校验")
+                return done()
+
+        sup = ScriptedSupervisor([{"ruling": "HINT", "hint": "本页已登录，直接选 DONE"}])
+        engine = FlakyEngine(settings_for(tmp_path))
+        driver = FakeDriver([snapshot("a"), snapshot("b", text="好了")])
+        runner = Runner(settings_for(tmp_path), "目标", "http://x/",
+                        checks=[parse_check("text_contains=好了")], task="t", driver=driver,
+                        engine=engine, verbose=False, supervisor=sup)
+        result = runner.run()
+
+        assert result.status == "ok" and engine.calls == 8  # Phase1×2 + Phase2×5 + 监督后1次
+        assert sup.asked[0]["trigger"] == "decide_invalid"
+        assert engine.rules[7] == [NEXT_ACTION, "本页已登录，直接选 DONE"]
+        rows = read_rows(result.run_dir)
+        model_rows = [row for row in rows if row.get("kind") == "model"]
+        assert any("未通过校验" in row.get("error", "") for row in model_rows)
+        esc_row = next(row for row in rows if isinstance(row.get("supervisor"), dict))
+        assert esc_row["supervisor"]["ruling"] == "HINT"
+
+    def test_rejected_answer_stays_fatal_without_supervision(self, tmp_path):
+        engine = FakeEngine([], error=ValueError("决策模型响应未通过校验；未执行任何动作。"))
+        runner = Runner(settings_for(tmp_path, ui_agent_supervisor=False), "目标", "http://x/",
+                        checks=[], task="t", driver=FakeDriver([snapshot("a")]),
+                        engine=engine, verbose=False, supervisor=None)
+        result = runner.run()
+        assert result.status == "error" and "未通过校验" in result.detail

@@ -87,6 +87,11 @@ class CaseCopy(BaseModel):
     scenario_id: str | None = None
 
 
+class CasePatch(BaseModel):
+    """用例元信息修改：当前只有互斥挡（none | env | account）。"""
+    mutex: str | None = None
+
+
 class EnvIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     label: str = ""
@@ -182,7 +187,27 @@ class PasswordResetIn(BaseModel):
 
 
 class ModelKeysIn(BaseModel):
-    """模型 Key：None=不改，空串=清除（值只写不读）。"""
+    """模型配置：None=不改，空串=清除。Key 只写不读；地址/模型名可回显。"""
 
     text_model_api_key: str | None = Field(default=None, max_length=512)
     typesafe_api_key: str | None = Field(default=None, max_length=512)
+    text_model_base_url: str | None = Field(default=None, max_length=512)
+    typesafe_base_url: str | None = Field(default=None, max_length=512)
+    text_model: str | None = Field(default=None, max_length=128)
+    typesafe_model: str | None = Field(default=None, max_length=128)
+
+
+class RunSettingsIn(BaseModel):
+    """并发设置：None=不改；max 1..8 强校验、k>max 后端自动夹到 max。"""
+
+    max: int | None = None
+    k: int | None = None
+
+
+class PolicyIn(BaseModel):
+    """运行策略（模型开关）：None=不改；decider 三选一（jev / llm / off），其余布尔。"""
+
+    decider: str | None = None
+    supervisor: bool | None = None
+    cache: bool | None = None
+    cache_strict: bool | None = None

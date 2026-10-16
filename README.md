@@ -51,7 +51,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8770   # ⑥ 起服务
   无桌面的 Linux 上不设它，有头浏览器起不来。
 - 内核的浏览器/产物目录按"包所在工程根"推导，副本放进 `kernel/` 后 `.browsers/`、`.artifacts/` 自动落在
   `ui_backend/kernel/` 下，整体自洽，不需要改内核代码。`.browsers/` 与 `kernel/.env` 都在 gitignore，
-  `sync_kernel.py` 同步时也不动它们。
+  `sync_kernel.py` 同步时也不动它们。回放缓存就在 `kernel/.artifacts/cache/`（跨运行持久、不随部署丢失；清缓存=删该目录）。
 - 部署前同步内核（开发在源仓库 `../ui_agent` 进行）：
 
 ```bash
@@ -74,7 +74,7 @@ SMOKE_DB_URL="mysql+pymysql://root:<本地口令>@127.0.0.1:3306/ui_web_smoke?ch
 ```
 
 冒烟覆盖主流程 24 项：健康检查 / 登录鉴权 / 用户管理（自助改密 + 管理员围墙）/ 分类树 /
-环境与密钥（只写不读）/ 模型 API Key（只写不读 + 注入内核子进程）/ 探针与页清单 /
+环境与密钥（只写不读）/ 模型配置（Key 只写不读 + API 地址/模型名回显，一起注入内核子进程）/ 探针与页清单 /
 用例校验（错误码+行号）/ 保存与乐观锁 409 / TestPlan 预览 /
 自然语言草稿 / 运行（debug·ci·失败·停止）/ SSE 实时事件 / 产物与报告（含路径穿越）/ 运行台账筛选 /
 版本回滚 / 软删除 / 场景管理（套件 + 批次串跑，失败继续）/ 批次停止（aborted / 再停 409）/
@@ -123,15 +123,16 @@ uv run python scripts/import_midscene.py case.js --check           # 顺带用�
 |---|---|
 | 校验 + 编译预览 | `case compile --in <yaml> --json [--secret-keys a,b]` |
 | 自然语言 → YAML 草稿 | `case draft --desc … --url … --json` |
-| 运行 | `run --plan-file … --run-dir <dir> --mode debug\|ci --url … --json [--var k=v]` |
+| 运行 | `run --plan-file … --run-dir <dir> --mode debug\|ci --url … --json [--var k=v] [--decider jev\|llm\|off --supervisor on\|off --cache on\|off [--cache-strict]]`（后四项按运行策略快照透传） |
 | 探针 | `snapshot --url … --json`（`summary.{final_url,title,element_count,needs_login,has_password_field}`） |
 | 重出报告 | `report --run-dir … --json` |
 
 约定（内核侧 README「给平台/CI 用的命令行契约」有完整版）：带 `--json` 时 stdout 只留一份 JSON、
 人类话术走 stderr；退出码 `0`=成功、`1`=用例失败（JSON 仍有效）、其他=内核错误，平台按 `(0, 1)` 回读。
-运行目录根部的聚合 `trace.jsonl`（每行带 `step/url/title`，另加 `plan_step`）与 `actions.json` 是平台 SSE、
-页清单与「决策时间线」的数据源；debug/ci 只管"逐步截图 / 只留失败一张"，与有无头解绑
-（服务器侧用 `UI_AGENT_HEADLESS=true`，`--mode debug` 也不会弹窗）。
+运行目录根部的聚合 `trace.jsonl` 是一份**分层时间线**（`run_start`/`run_end`/`step_start`/`step_end` 生命周期行 +
+`decision` 决策行 + `assert` 断言行 + `model` 模型调用行 + `cache` 回放缓存事实行，每行带 `seq` 与毫秒级 `at`）：决策行带 `step/url/title`、
+计划模式每行另加 `plan_step`；它是平台 SSE、页清单与「决策时间线」的数据源。debug/ci 只管"逐步截图 / 只留失败一张"，
+与有无头解绑（服务器侧用 `UI_AGENT_HEADLESS=true`，`--mode debug` 也不会弹窗）。
 
 内核侧 lint 错误码（平台逐行标红用的）：`steps_empty / goal_empty / checks_empty / ref_in_goal / bad_kind /
 bad_check / empty_check / bad_name / unknown_secret / duplicate_key / bad_vars / bad_step / bad_root /
@@ -141,6 +142,54 @@ yaml_error / empty_file`，警告码：`weak_final_check / too_many_checks / too
 `UI_WEB_KERNEL_CMD` 默认 `ui-agent`，就是同一个 venv 里、指向 `kernel/` 副本的控制台脚本；
 要临时改指别处内核（比如源仓库自己的 venv），只改这一项即可，例如
 `UI_WEB_KERNEL_CMD="D:/test_skills/ui_agent/.venv/Scripts/ui-agent.exe"`。
+
+## 并行调度与用例互斥
+
+调度器（`run_service.RunQueue`）默认串行；管理员在设置页「并行调度」卡片（`GET/PUT /settings/run`）改两档：
+
+- **max**（1..8，硬上限 8）：全局同时在跑的 run 数上限；初始值取 `UI_WEB_RUN_CONCURRENCY`；
+- **k**（1..max，默认 1）：同一用户同时在跑的上限；k>max 自动夹到 max（接口兜底 + 前端提示）。
+
+值落 `secrets/_run_settings.local.yaml`（现读现用）：**调大立刻派发排队的 run，调小只影响新派发、不打断在跑的**。
+等待中的 run 按 FIFO 派发；`GET /health` 的 `queue.{pending,running,pool,max,k}` 是顶栏「队列 N」与设置页卡片的数据源，
+`run_brief` 的 `queue_position` 供台账/详情显示队内位次。
+
+每路由「人+路」两级分登录态目录：`artifacts/chrome-profiles/u{uid}/lane-{n}`（派发时取该用户最小空闲路），
+经环境变量 `UI_AGENT_PROFILE_DIR` 注入内核子进程——并发的两路各起独立 Chromium，互不抢 profile 单实例锁。
+登录态不自动迁移：同一人换路（lane 号变了）就是新登录态，第一次跑要重新登录。
+
+用例可设「互斥挡」（用例详情页下拉 / `PATCH /cases/{id}` 传 `{mutex}`）：
+
+| 挡 | 语义 |
+|---|---|
+| `none`（默认） | 不挡 |
+| `env` | 与任何同 env 的在跑 run 互斥 |
+| `account` | 与（环境 + 解析后的账号/密码）哈希键相同的在跑 run 互斥；解析不到账号时自动降级为 `env` 挡，运行详情标注 |
+
+互斥是**双向检查**（命中公式在 `run_service.mutex_conflict`）：互斥用例既会等前面同环境/同账号的非互斥 run，
+也会让后面的非互斥 run 排队。账号键在提交 run 时按解析后的「账号/密码」值取 sha256 快照存 Run 行（不存明文）。
+
+- 停止权限：发起人或管理员（`POST /runs/{id}/stop`）；老数据没有发起人时只许管理员。
+
+## 运行策略（模型四档开关 + 回放缓存）
+
+顶栏「策略」四开关（仅管理员，`GET/PUT /settings/policy`，值落 `secrets/_run_policy.local.yaml`）：
+
+| 开关 | 字段 | 语义 |
+|---|---|---|
+| Jev | `decider` | `jev`=Jev 决策（默认）/ `llm`=大模型代班 Jev（不开思考，复用 Jev 入/出参结构）/ `off`=关闭 |
+| 大模型 | `supervisor` | `on`=监督裁决 + 卡住升级 + 字段取值 / `off`=总闸关闭（升级点直接停、TYPE_TEXT 只认 `--var`） |
+| 回放 | `cache` | `on`=命中免模型 + 断言确认后录制 / `off`=本次运行不读写缓存 |
+| 严判 | `cache_strict` | `on`=命中的记录还须状态签名一致（URL 路径 + 标题 + 元素 role+label 集合），否则按失配交还；回放关时不可用 |
+
+两两组合得四档：**全开**（Jev + 大模型）/ **只开 Jev** / **只开大模型** / **零模型**（全关）。零模型 + 全命中 = 整轮零模型调用；
+零模型下失配即停（`cache_missed`），有模型时失配交还模型并自愈回填（被判失败的步会淘汰该步旧录像，防投毒）。
+
+- **按提交时快照执行**：提交 run 时把当前策略写进 `run.policy`（台账/详情/报告显示这份快照），改动只影响之后新提交的 run；
+  老台账没有快照 → 按默认「全开」执行与显示。
+- 内核侧透传为 `--decider … --supervisor on|off --cache on|off [--cache-strict]`；
+  回放缓存默认落 `kernel/.artifacts/cache/`（跨运行持久、随 `kernel/.artifacts` 一起 gitignore；清缓存=删该目录）。
+
 
 ## 目录结构
 
@@ -157,7 +206,8 @@ app/
 │   ├─ model_keys.py       模型 API Key：secrets/_model_keys.local.yaml（只写不读、注入内核子进程）
 │   ├─ case_service.py     YAML ↔ TestPlan：校验 / 保存版本 / 回滚 / 草稿
 │   ├─ suite_service.py    串跑套件（场景管理）：CRUD / 有序清单 / 引用校验 / 存清单
-│   ├─ run_service.py      串行队列 + 状态映射 + 页清单登记 + 停止 / 重出报告 + 批次（同 batch_code 按序入队 / 停止批次）
+│   ├─ run_service.py      并发调度（max/k/互斥双向/动态生效）+ 状态映射 + 页清单登记 + 停止 / 重出报告 + 批次（同 batch_code 按序入队 / 停止批次）
+│   ├─ run_settings.py     运行并发设置（secrets/_run_settings.local.yaml，现读现用）
 │   ├─ retention.py        保留策略（§13）
 │   └─ audit.py            审计
 ├─ importers/
@@ -175,12 +225,14 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
 | POST | `/auth/login` · GET `/auth/me` | 登录换 token / 当前用户 |
 | PATCH | `/auth/me` · PUT `/auth/password` | 改自己的昵称 / 改自己的密码（要核对原密码，401 `bad_password`） |
 | GET/POST | `/users` · PATCH `/users/{id}` · POST `/users/{id}/password` | 用户管理（**仅管理员**，否则 403）：列表 / 新建 / 改名·停用·设管理员（不能动自己，409 `self_guard`）/ 重置密码 |
-| GET/PUT | `/settings/model-keys` | 模型 API Key（**仅管理员**，否则 403）：状态（键名+已设置+来源） / 写入（`None`=不改、空串=清除；值只写不读，落 `secrets/_model_keys.local.yaml`） |
+| GET/PUT | `/settings/model-keys` | 模型配置（**仅管理员**，否则 403）：两把 Key 的状态（键名+已设置+来源，只写不读）+ 四个端点项（`TEXT_MODEL_BASE_URL`/`TEXT_MODEL`/`TYPESAFE_BASE_URL`/`TYPESAFE_MODEL`，值可回显、留空=回落内核默认、地址须 `http(s)://` 否则 422 `bad_url`） / 写入（`None`=不改、空串=清除；同落 `secrets/_model_keys.local.yaml`） |
+| GET/PUT | `/settings/run` | 并行调度设置（**仅管理员**）：当前生效值 + 队列计数（`pending/running/pool/max/k/hard_max`） / 改 `max`·`k`（即改即生效，PUT 自动唤醒重派） |
+| GET/PUT | `/settings/policy` | 运行策略（**仅管理员**）：`{decider: jev\|llm\|off, supervisor, cache, cache_strict}`；提交 run 时快照进 `run.policy`（老台账空对象按全开执行/显示） |
 | GET/POST | `/nodes` · PATCH/DELETE `/nodes/{id}` | 分类树 |
 | GET/POST | `/scenarios` · GET/PATCH/DELETE `/scenarios/{id}` | 场景 |
 | GET/POST | `/scenarios/{id}/cases` | 场景下用例列表 / 新建 |
 | GET | `/cases` | 全局用例池（场景管理选择器）：`node_id` / `scenario_id` / `q` 过滤，跨场景 |
-| GET/PUT | `/cases/{id}` | 详情 / 保存（乐观锁 409、校验 422、成功留版本） |
+| GET/PUT/PATCH | `/cases/{id}` | 详情 / 保存（乐观锁 409、校验 422、成功留版本）/ 改互斥挡 `{mutex: none\|env\|account}` |
 | POST | `/cases/{id}/validate` · `/drafts` · `/imports` | 校验+TestPlan / 自然语言草稿 / 老脚本（midscene.js）导入（都不落库） |
 | GET/POST | `/cases/{id}/versions…` · `/rollback` · `/copy` | 版本 / 回滚（前滚）/ 复制 |
 | GET/POST/PATCH/DELETE | `/envs…` | 环境；`PUT /envs/{id}/secrets` 只写不读、`DELETE /envs/{id}/secrets/{key}` 删键；`POST /envs/{id}/probe` 探针；`GET /envs/{id}/pages` 页清单 |
@@ -198,8 +250,9 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
 
 - 密钥只存 `secrets/<env>.local.yaml`（gitignore、写时 chmod 600）；接口**只写不读**，响应只回键名与"已设置"；
 - 模型 API Key（`TEXT_MODEL_API_KEY` / `TYPESAFE_API_KEY`）同一不变式：只存 `secrets/_model_keys.local.yaml`，
-  设置页只写不读；每次起内核子进程时注入环境变量（存储值优先于服务器进程 env，内核 pydantic-settings 直接读），
-  即改即生效、不用重启；
+  设置页只写不读；API 地址 / 模型名（`TEXT_MODEL_BASE_URL`·`TEXT_MODEL`·`TYPESAFE_BASE_URL`·`TYPESAFE_MODEL`）
+  同文件托管但可回显（支持中转站 / 替代网关，地址不是密钥）；两者每次起内核子进程时一起注入环境变量
+  （存储值优先于服务器进程 env，内核 pydantic-settings 直接读），即改即生效、不用重启；
 - 启动日志里的库地址带脱敏（`mysql+pymysql://user:***@host/db`）；冒烟的明文扫描除了用例/环境密钥、模型 Key，
   还会把外部库口令一起盯上；
 - 真值只在运行前解析成内核 `--var` 参数，**不进模型、不进产物、不进日志**（冒烟会全目录扫描明文）；
@@ -216,5 +269,6 @@ tests/                     conftest（临时库+桩）· kernel_client · core/s
 - 运行记录导出 CSV 暂未实现（spec §8 的按钮已在用例/运行两级打通；场景级"整场景串跑"已由
   「场景管理」套件 + 批次取代，旧入口已移除）；
 - 内核的真实模型路径（`case draft`、带决策模型的运行）要有 API Key 才能实跑：管理员在设置页
-  「模型 API Key」里填两把 Key 即可（写入后对之后的内核调用生效）；或者沿用内核自己的 `.env` / `kernel/.env`。
-  平台冒烟仍刻意避开付费调用。
+  「模型 API 配置」里填两把 Key 即可（写入后对之后的内核调用生效）；或者沿用内核自己的 `.env` / `kernel/.env`。
+  用中转站时在同一卡片改 API 地址与模型名（文本模型任意 OpenAI 兼容网关；决策模型须兼容 Jev/SystemOne
+  `POST <地址>` 协议）；地址留空保存=恢复内核默认。平台冒烟仍刻意避开付费调用。

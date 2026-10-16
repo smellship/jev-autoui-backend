@@ -81,7 +81,12 @@ def list_runs(user: CurrentUser, db: Db, case_id: str = "", env_id: int | None =
     total = db.scalar(select(func.count()).select_from(query.subquery())) or 0
     rows = db.scalars(query.order_by(Run.id.desc())
                       .offset((max(1, page) - 1) * size).limit(size)).all()
-    return {"items": [run_brief(run) for run in rows], "total": total, "page": page, "size": size}
+    positions: dict[int, int] = {}
+    if any(run.status == "queued" for run in rows):
+        queued_ids = db.scalars(select(Run.id).where(Run.status == "queued").order_by(Run.id)).all()
+        positions = {run_id: index + 1 for index, run_id in enumerate(queued_ids)}
+    return {"items": [run_brief(run, positions.get(run.id)) for run in rows],
+            "total": total, "page": page, "size": size}
 
 
 @router.get("/{run_id}")

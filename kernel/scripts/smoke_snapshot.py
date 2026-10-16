@@ -89,7 +89,7 @@ def main() -> int:
         check("密码框带敏感标记", any(el.secret for el in state.elements),
               str([(el.label, el.secret) for el in state.elements]))
         check("视口外的『下方按钮』被标记", any(not el.in_viewport for el in state.elements), "应有一个视口外元素")
-        check("隐藏区域里的元素不进表", not any("查询" in el.label for el in state.elements),
+        check("隐藏区域里的元素不进表", not any(el.label in ("查询", "高级查询") for el in state.elements),
               str([el.label for el in state.elements]))
         disabled = [el for el in state.elements if el.label == "重 置"]
         check("禁用按钮作为事实可见，但没有任何可执行的 operation",
@@ -127,7 +127,7 @@ def main() -> int:
             check(item.label, item.ok, item.evidence)
 
         print("\n[4] 标签区分：『查询』不是『高级查询』")
-        hits = [el for el in state.elements if "查询" in el.label]
+        hits = [el for el in state.elements if el.label in ("查询", "高级查询")]
         check("两个按钮都在候选里且标签不同",
               sorted(el.label for el in hits) == ["查询", "高级查询"], str([el.label for el in hits]))
 

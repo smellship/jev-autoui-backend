@@ -8,12 +8,12 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import Case, Node, Run, Scenario, Suite, SuiteCase
+from app.models import Case, Node, Run, Scenario, Suite, SuiteCase, iso_utc
 from app.services import run_service
 
 
 def iso(value) -> str | None:
-    return value.isoformat(timespec="seconds") if value else None
+    return iso_utc(value)
 
 
 def user_brief(user) -> dict:
@@ -70,7 +70,9 @@ def run_brief(run: Run, position: int | None = None) -> dict:
         "status": run.status, "kernel_status": run.kernel_status, "detail": run.detail,
         "steps": run.steps, "created_at": iso(run.created_at), "started_at": iso(run.started_at),
         "finished_at": iso(run.finished_at), "duration_ms": run.duration_ms,
-        "triggered_by": run.triggered_by, "queue_position": position,
+        "triggered_by": run.triggered_by, "user_id": run.user_id, "queue_position": position,
+        "mutex": run.mutex or "none",
+        "policy": run.policy or {},
         "report_url": f"/api/v1/runs/{run.code}/report",
         "events_url": f"/api/v1/runs/{run.code}/events",
     }
@@ -91,7 +93,7 @@ def case_brief(case: Case, last_run: Run | None = None, yaml_text: str | None = 
     data = {
         "id": case.code, "scenario_id": case.scenario_id, "name": case.name,
         "priority": case.priority, "tags": case.tags or [], "owner": case.owner,
-        "version": case.current_version,
+        "version": case.current_version, "mutex": case.mutex or "none",
         "created_by": case.created_by, "updated_by": case.updated_by,
         "updated_at": iso(case.updated_at),
         "last_run": run_brief(last_run) if last_run else None,
@@ -139,6 +141,8 @@ def artifacts_of(run: Run, limit: int = 500) -> list[dict]:
 def run_detail(db: Session, run: Run) -> dict:
     summary = run_service.read_summary(run.artifact_dir)
     data = run_brief(run, run_service.queue_position(db, run))
+    data["mutex_note"] = ("账号挡位没解析到账号，本次已按环境挡参与互斥"
+                          if run.mutex == "account" and not run.mutex_key else "")
     data["checks"] = run.checks or []
     data["steps_detail"] = summary.get("steps") or []
     data["defect_candidates"] = summary.get("defect_candidates") or []

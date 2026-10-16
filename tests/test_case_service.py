@@ -47,7 +47,7 @@ def test_compile_maps_checks_to_plan():
     checks = result["plan"]["steps"][0]["checks"]
     assert checks[0]["kind"] == "element_exists"
     assert checks[1] == {"kind": "element_value", "value": "行政区域", "expected": "2102 大连",
-                         "role": "行政区域"}
+                         "role": "", "attr": "", "timeout_ms": 0}
 
 
 def test_compile_reports_errors_with_line_numbers():

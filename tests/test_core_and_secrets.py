@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,15 @@ from app.core.errors import ApiError
 from app.core.paths import safe_join
 from app.core.security import create_token, decode_token, hash_password, verify_password
 from app.main import _safe_db_url
+from app.models import iso_utc
 from app.services import secret_store
+
+
+def test_iso_utc_attaches_offset():
+    """库里的 naive UTC 出站时补 +00:00：前端按本地时区展示/计时才不失真。"""
+    assert iso_utc(datetime(2026, 10, 15, 7, 47, 41)) == "2026-10-15T07:47:41+00:00"
+    assert iso_utc(datetime(2026, 10, 15, 7, 47, 41, tzinfo=UTC)) == "2026-10-15T07:47:41+00:00"
+    assert iso_utc(None) is None
 
 
 def test_safe_db_url_masks_credentials():

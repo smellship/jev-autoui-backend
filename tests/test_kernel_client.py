@@ -41,6 +41,12 @@ def test_call_json_raises_on_bad_exit_code():
     assert exc.value.code == "kernel_failed"
 
 
+def test_child_env_injects_profile_dir_only_when_given(tmp_path):
+    assert "UI_AGENT_PROFILE_DIR" not in kernel_client.child_env()
+    target = tmp_path / "u1" / "lane-0"
+    assert kernel_client.child_env(target)["UI_AGENT_PROFILE_DIR"] == str(target)
+
+
 def test_snapshot_summary_shape():
     data = kernel_client.call_json(["snapshot", "--url", "http://192.0.2.10/login", "--json"])
     assert data["ok"] is True

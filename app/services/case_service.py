@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError, not_found
 from app.importers import midscene
-from app.models import Case, CaseVersion, Env, utcnow
+from app.models import Case, CaseVersion, Env, iso_utc, utcnow
 from app.services import audit, kernel_client
 from app.services.kernel_client import KernelError
 
@@ -150,7 +150,7 @@ def save(db: Session, case: Case, yaml_text: str, expected_version: int, user, c
     audit.log(db, user, "case.save", "case", case.code, {"version": version, "comment": comment})
     db.commit()
     return {"version": version, "warnings": result["warnings"], "plan": result["plan"],
-            "meta": meta, "updated_at": case.updated_at.isoformat(timespec="seconds")}
+            "meta": meta, "updated_at": iso_utc(case.updated_at)}
 
 
 def rollback(db: Session, case: Case, version: int, user) -> dict:
@@ -185,13 +185,15 @@ def new_case(db: Session, scenario, name: str, priority: str | None = None, owne
     priority = priority or scenario.priority or "P2"
     who = actor(user) or owner  # 操作人缺席（老调用）时退回负责人，宁可有个名字也别留空
     yaml_text = skeleton(code, name, priority, owner, env_name)
+    mutex = "none"
     if template == "copy" and copy_from:
         source = db.scalar(select(Case).where(Case.code == copy_from, Case.deleted_at.is_(None)))
         if source is None:
             raise not_found("被复制的用例", copy_from)
         yaml_text = _reidentify(source.yaml_text, code, name)
+        mutex = source.mutex or "none"  # 互斥挡是配置，复制时跟着走
     case = Case(code=code, scenario_id=scenario.id, name=name, priority=priority, owner=owner,
-                yaml_text=yaml_text, current_version=1, created_by=who, updated_by=who)
+                yaml_text=yaml_text, mutex=mutex, current_version=1, created_by=who, updated_by=who)
     db.add(case)
     db.flush()
     db.add(CaseVersion(case_id=case.id, version=1, yaml_text=yaml_text, comment="创建", author=who))

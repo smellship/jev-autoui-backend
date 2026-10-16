@@ -1,4 +1,4 @@
-"""内核桩：本地开发/冒烟用，按 spec §4.2/§6.2 的契约返回，零浏览器、零模型调用。
+r"""内核桩：本地开发/冒烟用，按 spec §4.2/§6.2 的契约返回，零浏览器、零模型调用。
 
 真实实现在 `ui_agent`（D:\\test_skills\\ui_agent）；本文件只是让平台后端能独立跑通，
 JSON 形状必须与下表一致：
@@ -25,7 +25,8 @@ from pathlib import Path
 import yaml
 
 KINDS = ("text_contains", "url_contains", "title_contains",
-         "element_exists", "element_absent", "element_value")
+         "element_exists", "element_absent", "element_value",
+         "element_count", "element_attribute")
 BAD_NAME_CHARS = set('/\\:*?"<>|')
 SLOW_MS = int(os.environ.get("FAKE_KERNEL_STEP_MS", "120"))
 
@@ -41,13 +42,32 @@ def find_line(text: str, needle: str) -> int:
     return 1
 
 
-def check_spec(kind: str, value: str) -> dict:
-    role = ""
-    expected = value
-    if kind == "element_value" and "|" in value:
-        role, _, expected = value.partition("|")
-    return {"kind": kind, "value": value if kind != "element_value" else role,
-            "expected": expected, "role": role}
+def check_spec(kind: str, value: str, expected: str = "", role: str = "",
+               attr: str = "", timeout_ms: int = 0) -> tuple[dict | None, str]:
+    """编译成与内核 CheckSpec 同形的完整断言；返回 (spec, 错误说明)。
+
+    单键写法先按「标签|期望值」切分再进来；element_count 的整数期望与
+    element_attribute 的 attr 必填在这里校验，与内核口径一致。
+    """
+    if kind == "element_attribute" and not attr.strip():
+        return None, "element_attribute 断言必须给 attr（属性名）"
+    if kind == "element_count":
+        if not expected:
+            if value.isdigit():
+                value, expected = "", value
+            else:
+                expected = value
+        if not expected.isdigit():
+            return None, f"element_count 的期望值必须是整数个数：{expected or '（空）'}"
+    else:
+        if not value:
+            value = expected
+        if not expected:
+            expected = value
+        if not value:
+            return None, f"断言 {kind} 没有给值"
+    return {"kind": kind, "value": value, "expected": expected, "role": role,
+            "attr": attr, "timeout_ms": timeout_ms}, ""
 
 
 def cmd_compile(args) -> int:
@@ -111,16 +131,43 @@ def cmd_compile(args) -> int:
             checks = []
         specs = []
         for item in checks:
-            if not isinstance(item, dict) or len(item) != 1:
+            if not isinstance(item, dict) or not item:
                 errors.append({"line": find_line(text, str(item)[:12]), "code": "bad_check",
-                               "message": f"第 {number} 步的断言写法应为 `kind: 值` 或 `kind: 标签|期望值`"})
+                               "message": f"第 {number} 步的断言写法应为 `kind: 值`、`kind: 标签|期望值`，"
+                                          "或含 kind/value/expected 的完整写法"})
                 continue
-            kind, value = next(iter(item.items()))
-            if kind not in KINDS:
-                errors.append({"line": find_line(text, str(kind)), "code": "bad_kind",
-                               "message": f"断言类型非法：{kind}（可用：{'/'.join(KINDS)}）"})
+            if "kind" in item:  # 完整写法（可带 attr / timeout_ms）
+                kind = str(item.get("kind") or "")
+                if kind not in KINDS:
+                    errors.append({"line": find_line(text, kind), "code": "bad_kind",
+                                   "message": f"断言类型非法：{kind}（可用：{'/'.join(KINDS)}）"})
+                    continue
+                try:
+                    timeout_ms = int(item.get("timeout_ms") or 0)
+                except (TypeError, ValueError):
+                    errors.append({"line": find_line(text, str(item.get("timeout_ms"))), "code": "bad_check",
+                                   "message": f"timeout_ms 必须是整数毫秒：{item.get('timeout_ms')}"})
+                    continue
+                spec, problem = check_spec(kind, str(item.get("value") or ""),
+                                           str(item.get("expected") or ""), str(item.get("role") or ""),
+                                           str(item.get("attr") or ""), timeout_ms)
+            elif len(item) == 1:  # 单键写法：kind: 值 / kind: 标签|期望值
+                kind, value = next(iter(item.items()))
+                if kind not in KINDS:
+                    errors.append({"line": find_line(text, str(kind)), "code": "bad_kind",
+                                   "message": f"断言类型非法：{kind}（可用：{'/'.join(KINDS)}）"})
+                    continue
+                target, _, expected = str(value).partition("|")
+                spec, problem = check_spec(str(kind), target.strip(), expected.strip())
+            else:
+                errors.append({"line": find_line(text, str(item)[:12]), "code": "bad_check",
+                               "message": "断言要么是「类型: 值」单键写法，要么是含 kind/value/expected 的完整写法"})
                 continue
-            specs.append(check_spec(str(kind), str(value)))
+            if spec is None:
+                errors.append({"line": find_line(text, str(item)[:12]), "code": "bad_check",
+                               "message": f"第 {number} 步：{problem}"})
+                continue
+            specs.append(spec)
         if len(specs) > 3:
             warnings.append({"line": find_line(text, "- goal:"), "code": "too_many_checks",
                              "message": f"第 {number} 步断言多于 3 条，容易互相耦合"})
@@ -215,12 +262,21 @@ PNG_1PX = bytes.fromhex(
 )
 
 
+def _mask_url(value: str) -> str:
+    """只留 ? 之前的地址（防中转站把 token 放 query 里被写进日志）。"""
+    return value.split("?", 1)[0] if value else "empty"
+
+
 def cmd_run(args) -> int:
     plan = json.loads(Path(args.plan_file).read_text(encoding="utf-8"))
-    # 平台注入的模型 Key 有没有到子进程（只报有无、不打值），供冒烟核对注入链路
-    print("[stub] model-keys text=%s jev=%s" % (
+    # 平台注入的模型 Key/端点有没有到子进程（Key 只报有无；地址去 query 后原样），供冒烟核对注入链路
+    print("[stub] model-keys text=%s jev=%s text-url=%s jev-url=%s text-model=%s jev-model=%s" % (
         "set" if os.environ.get("TEXT_MODEL_API_KEY") else "empty",
-        "set" if os.environ.get("TYPESAFE_API_KEY") else "empty"), flush=True)
+        "set" if os.environ.get("TYPESAFE_API_KEY") else "empty",
+        _mask_url(os.environ.get("TEXT_MODEL_BASE_URL") or ""),
+        _mask_url(os.environ.get("TYPESAFE_BASE_URL") or ""),
+        os.environ.get("TEXT_MODEL") or "default",
+        os.environ.get("TYPESAFE_MODEL") or "default"), flush=True)
     run_dir = Path(args.run_dir)
     (run_dir / "screenshots").mkdir(parents=True, exist_ok=True)
     (run_dir / "snapshots").mkdir(parents=True, exist_ok=True)
@@ -318,6 +374,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--mode", choices=["debug", "ci"], default="ci")
     run.add_argument("--url", default="")
     run.add_argument("--var", action="append", default=[])
+    # 策略开关（平台四档透传）：桩接受但不解释，形状对齐真内核的 run 子命令
+    run.add_argument("--decider", choices=["jev", "llm", "off"], default="jev")
+    run.add_argument("--supervisor", choices=["on", "off"], default="on")
+    run.add_argument("--cache", choices=["on", "off"], default="on")
+    run.add_argument("--cache-strict", action="store_true")
     run.add_argument("--json", action="store_true")
     run.set_defaults(func=cmd_run)
 

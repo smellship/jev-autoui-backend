@@ -23,6 +23,24 @@ class TestRepeatNoProgress:
         signal = detector.observe(click(), history(False, False))
         assert signal is not None and signal.kind == "repeat_no_progress"
         assert "3" in signal.detail
+        assert "[false, false]" in signal.detail
+
+    def test_detail_shows_page_change_history(self):
+        """前面在变、从某次起停了——历史序列是监督模型判断"没到页/到了没新数据"的证据。"""
+        detector = StuckDetector(conf_min=0.5)
+        detector.observe(click(), history())
+        detector.observe(click(), history(True))
+        signal = detector.observe(click(), history(True, False, False))
+        assert signal is not None
+        assert "[true, false, false]" in signal.detail and "旧→新" in signal.detail
+
+    def test_history_skips_unsettled_rows(self):
+        detector = StuckDetector(conf_min=0.5)
+        fact = RecentAction(action="PAGE", kind="tab", text="新标签页", step=4)
+        detector.observe(click(), history())
+        detector.observe(click(), history(False))
+        signal = detector.observe(click(), [*history(None, True, False, False), fact])
+        assert signal is not None and "[true, false, false]" in signal.detail
 
     def test_page_change_resets_progress_requirement(self):
         detector = StuckDetector(conf_min=0.5)
@@ -71,4 +89,26 @@ def test_page_fact_rows_do_not_mask_no_progress():
     assert detector.observe(click(), [*history(False), fact]) is None
     assert detector.observe(click(), [*history(False, False), fact]) is None
     signal = detector.observe(click(), [*history(False, False, False), fact])
+    assert signal is not None and signal.kind == "repeat_no_progress"
+
+
+def replayed(index: int = 1) -> Decision:
+    return Decision(operation="CLICK", target=str(index), target_element=index, confidence=1.0,
+                    model="cache")
+
+
+def test_replayed_decisions_are_exempt_from_stuck():
+    """回放只是照播录制时验证过的录像：重复点击不该在回放时重新触发卡住。"""
+    detector = StuckDetector(conf_min=0.5)
+    for _ in range(5):
+        assert detector.observe(replayed(), history(False, False, False)) is None
+
+
+def test_model_decisions_still_trigger_after_replay_exemption():
+    """豁免只对回放：模型自己的重复决策照旧触发。"""
+    detector = StuckDetector(conf_min=0.5)
+    assert detector.observe(replayed(), history(False, False, False)) is None
+    assert detector.observe(click(), history(False, False, False)) is None
+    assert detector.observe(click(), history(False, False, False)) is None
+    signal = detector.observe(click(), history(False, False, False))
     assert signal is not None and signal.kind == "repeat_no_progress"
